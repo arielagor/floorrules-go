@@ -15,7 +15,11 @@ import (
 
 // Config is the process configuration.
 type Config struct {
-	ListenAddr     string
+	ListenAddr string
+	// MetricsAddr serves /metrics on its own listener, apart from the API
+	// the load balancer exposes (default :9090). run() skips it when empty,
+	// which only a Config built in code can be.
+	MetricsAddr    string
 	StoreBackend   string // "postgres" or "memory"
 	DatabaseURL    string
 	RunMigrations  bool
@@ -45,6 +49,7 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 	var errs []error
 	c := Config{
 		ListenAddr:   or(getenv("LISTEN_ADDR"), ":8080"),
+		MetricsAddr:  or(getenv("METRICS_ADDR"), ":9090"),
 		StoreBackend: or(getenv("STORE_BACKEND"), "postgres"),
 		// Off by default: schema changes run as `floorsvc migrate` (the
 		// migrate Job) under a role with DDL rights, which the service's

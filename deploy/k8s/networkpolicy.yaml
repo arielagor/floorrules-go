@@ -20,13 +20,34 @@ spec:
       app.kubernetes.io/name: floorsvc
   policyTypes: ["Ingress", "Egress"]
   ingress:
-    # From the API gateway namespace only.
+    # The API is exposed through a GKE Gateway of class
+    # gke-l7-global-external-managed (global external Application Load
+    # Balancer). It reaches pods through container-native NEGs, so requests
+    # and health checks arrive from Google's ranges, not from a pod in the
+    # cluster: GFE proxies 35.191.0.0/16 and 130.211.0.0/22, health checks
+    # 35.191.0.0/16 (docs.cloud.google.com/load-balancing/docs/firewall-rules,
+    # checked 2026-10-04). A regional or internal class (gke-l7-rilb,
+    # gke-l7-regional-external-managed) instead needs the VPC's proxy-only
+    # subnet here, plus 35.191.0.0/16 for health checks.
+    - from:
+        - ipBlock:
+            cidr: 35.191.0.0/16
+        - ipBlock:
+            cidr: 130.211.0.0/22
+      ports:
+        - port: 8080
+          protocol: TCP
+    # Metrics: only Google Cloud Managed Service for Prometheus collectors,
+    # which run in gke-gmp-system on Autopilot (gmp-system on Standard).
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: gateway
+              kubernetes.io/metadata.name: gke-gmp-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
       ports:
-        - port: 8080
+        - port: 9090
           protocol: TCP
   egress:
     # DNS.

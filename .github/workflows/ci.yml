@@ -85,10 +85,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # CRDs (PodMonitoring, Rules, SecretProviderClass) validate against the
+      # datreeio CRDs-catalog schemas; a kind with no schema fails the job.
       - name: kubeconform
         run: |
           go install github.com/yannh/kubeconform/cmd/kubeconform@${KUBECONFORM_VERSION}
-          kubeconform -strict -summary deploy/k8s/
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            deploy/k8s/
       - uses: hashicorp/setup-terraform@v3
       - name: terraform validate (no backend, no plan, no apply)
         working-directory: infra/terraform

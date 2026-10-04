@@ -66,6 +66,20 @@ func (c client) post(path, body string, headers map[string]string) (int, map[str
 	return resp.StatusCode, out
 }
 
+func httpGet(t *testing.T, url string) int {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
 // H2 (day-2 review): a rolling deploy during an apply used to exit the
 // process with the apply mid-flight once srv.Shutdown's wait ran out,
 // leaving a partial, unaudited platform change. Shutdown must wait for
@@ -78,6 +92,10 @@ func TestShutdownWaitsForInFlightApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		StoreBackend: "memory", HMACSecret: testKey, Issuer: "https://issuer.test", Audience: "floorrules",
 		ShutdownDrain: 0, ShutdownWait: 10 * time.Millisecond, OutboxInterval: time.Hour,
@@ -86,7 +104,7 @@ func TestShutdownWaitsForInFlightApply(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, slog.New(slog.DiscardHandler), runOpts{store: st, ssp: ssp, listener: ln})
+		done <- run(ctx, cfg, slog.New(slog.DiscardHandler), runOpts{store: st, ssp: ssp, listener: ln, metricsListener: mln})
 	}()
 
 	tok, err := auth.SignHS256(testKey, auth.Claims{
@@ -116,6 +134,14 @@ func TestShutdownWaitsForInFlightApply(t *testing.T) {
 	case <-ssp.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("apply never reached the platform")
+	}
+
+	// Metrics are served on their own listener (M6), not the API port.
+	if code := httpGet(t, "http://"+mln.Addr().String()+"/metrics"); code != http.StatusOK {
+		t.Fatalf("metrics listener GET /metrics = %d", code)
+	}
+	if code := httpGet(t, c.base+"/metrics"); code != http.StatusNotFound {
+		t.Fatalf("API listener GET /metrics = %d, want 404", code)
 	}
 
 	cancel() // SIGTERM mid-apply

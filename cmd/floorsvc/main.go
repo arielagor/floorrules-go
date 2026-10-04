@@ -87,9 +87,10 @@ func migrate(ctx context.Context, dsn string, log *slog.Logger) error {
 // runOpts lets tests inject collaborators. Zero values mean production
 // defaults: the store from cfg, the mock SSP, a listener on cfg.ListenAddr.
 type runOpts struct {
-	store    store.Store
-	ssp      adapter.SSP
-	listener net.Listener
+	store           store.Store
+	ssp             adapter.SSP
+	listener        net.Listener
+	metricsListener net.Listener
 }
 
 // run serves until ctx is cancelled, then shuts down gracefully.
@@ -170,6 +171,33 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o runOpts) er
 	bgCtx, stopBackground := context.WithCancel(context.Background())
 	var bg sync.WaitGroup
 	bg.Go(func() { relay.Run(bgCtx) })
+
+	// Metrics get their own listener: the API port is what the load
+	// balancer exposes, and the NetworkPolicy admits only the managed
+	// Prometheus collectors to this one.
+	if mln := o.metricsListener; mln != nil || cfg.MetricsAddr != "" {
+		if mln == nil {
+			var lc net.ListenConfig
+			if mln, err = lc.Listen(ctx, "tcp", cfg.MetricsAddr); err != nil {
+				_ = ln.Close()
+				stopBackground()
+				bg.Wait()
+				return fmt.Errorf("metrics listener: %w", err)
+			}
+		}
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", m)
+		msrv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second}
+		bg.Go(func() {
+			if err := msrv.Serve(mln); !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics server", "err", err)
+			}
+		})
+		bg.Go(func() {
+			<-bgCtx.Done()
+			_ = msrv.Close()
+		})
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {

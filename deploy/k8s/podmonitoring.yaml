@@ -1,0 +1,19 @@
+# Google Cloud Managed Service for Prometheus scrapes floorsvc's metrics
+# port. Managed collection is on by default on Autopilot (GKE 1.25+);
+# networkpolicy.yaml admits its collectors to port 9090 and nothing else.
+# Alert rules on these metrics: prometheus-rules.yaml.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: floorsvc
+  namespace: floorrules
+  labels:
+    app.kubernetes.io/name: floorsvc
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: floorsvc
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

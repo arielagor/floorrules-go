@@ -368,10 +368,15 @@ func TestHealthReadinessAndErrorHiding(t *testing.T) {
 	if !strings.Contains(b.logs.String(), "request_id") {
 		t.Fatal("internal error not logged with request id")
 	}
+}
 
-	resp, _ = e.do(t, call{method: "GET", path: "/metrics"})
-	if resp.StatusCode != 200 {
-		t.Fatalf("metrics = %d", resp.StatusCode)
+// M6 (day-2 review): /metrics was served on the API port, the one the load
+// balancer exposes. Metrics live on their own listener (METRICS_ADDR) that
+// only the in-cluster scraper can reach.
+func TestMetricsAreNotOnTheAPIListener(t *testing.T) {
+	e := newEnv(t, nil)
+	if resp, _ := e.do(t, call{method: "GET", path: "/metrics"}); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /metrics on the API handler = %d, want 404", resp.StatusCode)
 	}
 }
 

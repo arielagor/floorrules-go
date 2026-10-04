@@ -53,9 +53,15 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            # Scraped by podmonitoring.yaml; not part of the Service.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
           env:
             - name: LISTEN_ADDR
               value: ":8080"
+            - name: METRICS_ADDR
+              value: ":9090"
             - name: STORE_BACKEND
               value: postgres
             # Schema changes run in migrate-job.yaml as floorsvc_migrator;

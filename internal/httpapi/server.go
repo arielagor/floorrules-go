@@ -50,7 +50,8 @@ func NewHandler(d Deps) http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
-	mux.Handle("GET /metrics", d.Metrics)
+	// /metrics is deliberately absent: it is served on METRICS_ADDR, a
+	// separate listener only the in-cluster scraper can reach.
 
 	mux.Handle("POST /v1/publishers/{pub}/rules", s.authed(auth.ScopeRulesWrite, s.createRule))
 	mux.Handle("GET /v1/publishers/{pub}/rules", s.authed(auth.ScopeRulesRead, s.listRules))

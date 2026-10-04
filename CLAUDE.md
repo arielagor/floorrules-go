@@ -7,4 +7,4 @@ Read and follow [AGENTS.md](AGENTS.md). It is the source of truth for convention
 - The race detector needs cgo, and this machine has no gcc. Run race and integration tests in the `golang:1.27` container exactly as VERIFY.md shows. Do not drop `-race` from the claim when you couldn't run it; say it was not run.
 - The test database is the `floorrules-pg` container on port 5544. Never connect to any other local Postgres.
 - Before you summarise work, run the definition-of-done checks and paste the real tail of each output. If something failed and you fixed it, add it to BUILD-LOG.md under "What the checks caught", including what you got wrong.
-- Commit at milestones with conventional prefixes. Never push.
+- Commit at milestones with conventional prefixes. Never run `git push` yourself; the owner's post-commit hook pushes commits that passed the pre-commit gate.

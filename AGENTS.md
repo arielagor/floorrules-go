@@ -51,7 +51,7 @@ The pre-commit hook (`git config core.hooksPath scripts`) runs 1, 2, 3, a non-ra
 
 ## What an agent may NOT do
 
-- Push, add a git remote, open a PR, or publish anything. The owner decides about publishing.
+- Run `git push`, add a git remote, open a PR, or publish anything yourself. The owner decides about publishing. On the owner's machine a post-commit hook pushes each commit that passed the pre-commit gate, and CI re-runs every check on the push.
 - Run `terraform plan`/`apply`, `kubectl apply`, `gcloud`, or anything else that creates or touches cloud resources or costs money.
 - Commit secrets, `.env` files, keys, or real customer/publisher data. Use the dev token tool.
 - Skip or weaken a check to get green: no `--no-verify`, no `//nolint` without a written justification on the same line, no deleting or `t.Skip`-ing a failing test, no lowering lint config.

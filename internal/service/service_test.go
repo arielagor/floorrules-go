@@ -266,14 +266,52 @@ func TestApply_DriftMakesPlanStale(t *testing.T) {
 	h := newHarness(t)
 	h.rule(t, "ctv", "US", 2_000_000)
 	p := h.plan(t)
-	// Someone edits the ad server by hand after the plan was reviewed.
-	h.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("desktop", "US"), FloorMicros: 900_000, ManagedBy: "human"})
+	// Someone sets the planned segment by hand after the plan was reviewed:
+	// the planned create would now silently take over their floor.
+	h.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("ctv", "US"), FloorMicros: 900_000, ManagedBy: "human"})
 	res, _, err := h.svc.ApplyPlan(context.Background(), "user:ops", pub, p.ID, "drift-key-01", false)
 	if err != nil || res.Status != domain.PlanStale {
 		t.Fatalf("apply = %+v, %v; want stale", res, err)
 	}
 	if h.ssp.Calls("SetFloor") != 0 {
 		t.Fatal("stale plan touched the platform")
+	}
+}
+
+// M8 (day-2 review): the precondition hashed every floor the publisher
+// has, so any change anywhere (other teams, other tools, hand edits to
+// segments this plan never touches) made the plan stale. On a busy
+// publisher apply would almost never succeed. The precondition is the
+// plan's own footprint: the segments its ops write, and what each op
+// expected to find there.
+func TestApply_UnrelatedChangeDoesNotMakePlanStale(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("ctv", "CA"), FloorMicros: 3_000_000, ManagedBy: domain.ManagedBy})
+	h.rule(t, "ctv", "US", 2_000_000)
+	h.rule(t, "ctv", "CA", 3_300_000)
+	p := h.plan(t)
+	if len(p.Ops) != 2 {
+		t.Fatalf("want an update and a create, got %+v", p.Ops)
+	}
+	// Other systems move floors the plan does not touch.
+	h.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("desktop", "US"), FloorMicros: 900_000, ManagedBy: "human"})
+	h.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("mobile", "GB"), FloorMicros: 400_000, ManagedBy: "other-agent"})
+	res, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "busy-key-001", false)
+	if err != nil || res.Status != domain.PlanApplied {
+		t.Fatalf("apply = %+v, %v; want applied: only untouched segments changed", res.Status, err)
+	}
+
+	// The update's precondition still holds it to the value it was planned
+	// against.
+	h2 := newHarness(t)
+	h2.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("ctv", "CA"), FloorMicros: 3_000_000, ManagedBy: domain.ManagedBy})
+	h2.rule(t, "ctv", "CA", 3_300_000)
+	p2 := h2.plan(t)
+	h2.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("ctv", "CA"), FloorMicros: 6_000_000, ManagedBy: domain.ManagedBy})
+	res, _, err = h2.svc.ApplyPlan(ctx, "user:ops", pub, p2.ID, "busy-key-002", false)
+	if err != nil || res.Status != domain.PlanStale {
+		t.Fatalf("apply after the planned segment moved = %+v, %v; want stale", res.Status, err)
 	}
 }
 

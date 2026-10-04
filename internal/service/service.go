@@ -202,7 +202,7 @@ func (s *Service) buildPlan(ctx context.Context, actor, publisherID string) (dom
 		return domain.Plan{}, err
 	}
 	return domain.Plan{
-		ID: id.New(), PublisherID: publisherID, Ops: ops, BaseFingerprint: domain.Fingerprint(floors),
+		ID: id.New(), PublisherID: publisherID, Ops: ops, BaseFingerprint: domain.Footprint(ops, floors),
 		Status: domain.PlanPending, CreatedBy: actor, CreatedAt: s.cfg.Now().UTC(),
 	}, nil
 }
@@ -367,8 +367,9 @@ func (s *Service) execute(ctx context.Context, plan domain.Plan) domain.ApplyRes
 		res.Status, res.Reason = domain.PlanFailed, "could not read platform state: "+err.Error()
 		return res
 	}
-	if domain.Fingerprint(floors) != plan.BaseFingerprint {
-		res.Status, res.Reason = domain.PlanStale, "platform state changed since the plan was computed; compute a new plan"
+	// Only the segments this plan writes are compared (domain.Footprint).
+	if domain.Footprint(plan.Ops, floors) != plan.BaseFingerprint {
+		res.Status, res.Reason = domain.PlanStale, "a segment this plan changes was modified on the platform since the plan was computed; compute a new plan"
 		return res
 	}
 

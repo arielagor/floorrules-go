@@ -177,18 +177,34 @@ func TestComputeOps_Deterministic(t *testing.T) {
 	}
 }
 
-func TestFingerprint_OrderIndependentAndSensitive(t *testing.T) {
+func TestFootprint_CoversOnlyThePlansSegments(t *testing.T) {
+	ops := []Op{
+		{Kind: OpUpdate, Segment: seg("ctv", "CA"), FromMicros: 2, ToMicros: 3},
+		{Kind: OpCreate, Segment: seg("ctv", "GB"), ToMicros: 5},
+	}
 	a := []PlatformFloor{
-		{Segment: seg("ctv", "US"), FloorMicros: 1, ManagedBy: ManagedBy},
+		{Segment: seg("ctv", "US"), FloorMicros: 1, ManagedBy: "human"},
 		{Segment: seg("ctv", "CA"), FloorMicros: 2, ManagedBy: ManagedBy},
 	}
-	b := []PlatformFloor{a[1], a[0]}
-	if Fingerprint(a) != Fingerprint(b) {
-		t.Fatal("fingerprint depends on order")
+	if Footprint(ops, a) != Footprint(ops, []PlatformFloor{a[1], a[0]}) {
+		t.Fatal("footprint depends on order")
 	}
-	c := []PlatformFloor{a[0], {Segment: seg("ctv", "CA"), FloorMicros: 3, ManagedBy: ManagedBy}}
-	if Fingerprint(a) == Fingerprint(c) {
-		t.Fatal("fingerprint ignores a floor change")
+	if Footprint(ops, a) != Footprint([]Op{ops[1], ops[0]}, a) {
+		t.Fatal("footprint depends on op order")
+	}
+	untouched := []PlatformFloor{{Segment: seg("ctv", "US"), FloorMicros: 9, ManagedBy: "other-agent"}, a[1]}
+	if Footprint(ops, a) != Footprint(ops, untouched) {
+		t.Fatal("a change outside the plan's segments changed the footprint")
+	}
+	for name, changed := range map[string][]PlatformFloor{
+		"updated segment moved":        {a[0], {Segment: seg("ctv", "CA"), FloorMicros: 4, ManagedBy: ManagedBy}},
+		"updated segment changed hand": {a[0], {Segment: seg("ctv", "CA"), FloorMicros: 2, ManagedBy: "human"}},
+		"updated segment deleted":      {a[0]},
+		"created segment now exists":   {a[0], a[1], {Segment: seg("ctv", "GB"), FloorMicros: 5, ManagedBy: "human"}},
+	} {
+		if Footprint(ops, a) == Footprint(ops, changed) {
+			t.Errorf("%s: footprint unchanged", name)
+		}
 	}
 }
 

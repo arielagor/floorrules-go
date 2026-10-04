@@ -297,10 +297,15 @@ func TestApplyStatusCodes(t *testing.T) {
 
 	// Drift -> 409 with a stale result.
 	stale := mk()
-	e.ssp.Seed("acme-tv", domain.PlatformFloor{Segment: domain.Segment{Device: "desktop", Geo: "*", Genre: "*", DemandPartner: "*"}, FloorMicros: 1_000_000, ManagedBy: "human"})
+	// Drift on the planned segment itself (a hand-set floor appears there).
+	e.ssp.Seed("acme-tv", domain.PlatformFloor{Segment: domain.Segment{Device: "ctv", Geo: "US", Genre: "*", DemandPartner: "magnite"}, FloorMicros: 1_000_000, ManagedBy: "human"})
 	resp, body := e.do(t, call{method: "POST", path: "/v1/publishers/acme-tv/plans/" + stale + "/apply", tok: tok, headers: map[string]string{"Idempotency-Key": "stale-key-0001"}})
 	if resp.StatusCode != 409 || body["status"] != "stale" {
 		t.Fatalf("stale apply = %d %v", resp.StatusCode, body)
+	}
+	// Remove the hand-set floor so the next plans are plain creates again.
+	if err := e.ssp.DeleteFloor(context.Background(), "acme-tv", domain.Segment{Device: "ctv", Geo: "US", Genre: "*", DemandPartner: "magnite"}); err != nil {
+		t.Fatal(err)
 	}
 
 	// Permanent SSP failure -> 502, and the replay returns the same 502.

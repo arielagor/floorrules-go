@@ -158,13 +158,38 @@ func changePct(from, to int64) int64 {
 	return d * 100 / from
 }
 
-// Fingerprint hashes platform state in an order-independent way. A plan stores
-// the fingerprint it was computed against; apply refuses to run if the
-// platform has drifted since, because the diff would no longer be correct.
-func Fingerprint(platform []PlatformFloor) string {
-	lines := make([]string, 0, len(platform))
+// Footprint hashes the platform state of the segments a plan's ops write,
+// and only those: for each, its floor and owner, or that it is absent. A
+// plan stores the footprint it was computed against, and apply refuses to
+// run if it has changed, because some op would then act on a value nobody
+// reviewed (an update from a different floor, a create over a floor someone
+// else just set, a delete of a floor that moved).
+//
+// Changes to segments outside the plan do not count. Hashing the whole
+// publisher made every plan stale on a publisher whose other floors move
+// all the time (day-2 review M8). The trade-off: an applied plan no longer
+// proves the publisher's floors equal the rules, only that every op found
+// what it was planned against; the next plan picks up the rest. The SSP has
+// no compare-and-set, so a write that lands between this check and the op
+// is still overwritten.
+func Footprint(ops []Op, platform []PlatformFloor) string {
+	current := make(map[string]PlatformFloor, len(platform))
 	for _, f := range platform {
-		lines = append(lines, fmt.Sprintf("%s=%d@%s", f.Segment.Key(), f.FloorMicros, f.ManagedBy))
+		current[f.Segment.Key()] = f
+	}
+	seen := make(map[string]bool, len(ops))
+	lines := make([]string, 0, len(ops))
+	for _, op := range ops {
+		key := op.Segment.Key()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if f, ok := current[key]; ok {
+			lines = append(lines, fmt.Sprintf("%s=%d@%s", key, f.FloorMicros, f.ManagedBy))
+		} else {
+			lines = append(lines, key+"=absent")
+		}
 	}
 	sort.Strings(lines)
 	h := sha256.New()

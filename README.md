@@ -11,7 +11,7 @@ The shape is plan, review, apply. Floors move money, so nothing touches the plat
 ## What it does
 
 1. `POST /v1/publishers/{pub}/rules` validates and stores a rule. All field errors come back at once, one active rule per segment.
-2. `POST /v1/publishers/{pub}/plans` reads the platform's current floors and diffs them against the active rules. The plan stores the ops (deletes, then updates, then creates, in a deterministic order) and a fingerprint of the platform state it saw.
+2. `POST /v1/publishers/{pub}/plans` reads the platform's current floors and diffs them against the active rules. The plan stores the ops (deletes, then updates, then creates, in a deterministic order) and a fingerprint of what it saw on the segments those ops write.
    - Guardrails: at most 200 ops per plan. An update that moves a floor by more than 50% is flagged risky, and so is taking over a floor this service did not set. It never deletes a floor it did not create.
 3. `POST /v1/publishers/{pub}/plans/{id}/apply` with an `Idempotency-Key` header applies the plan.
    - It refuses if the platform drifted since planning (`409 stale`) or if risky ops are not acknowledged (`422`).
@@ -76,6 +76,7 @@ git config core.hooksPath scripts                               # enable the pre
 - **Idempotency in the database, not in memory.**
   - `apply_attempts` is keyed by the client's key and also has a partial unique index allowing one in-flight attempt per plan.
   - An attempt abandoned by a crashed pod is reclaimable once its lease expires.
+- **The staleness check covers the plan's footprint, not the whole publisher.** Apply compares only the segments the plan writes (floor and owner, or absent) with what the plan saw. Floors elsewhere churn constantly (people, other tools, other playbooks), and a whole-publisher fingerprint made apply stale almost every time on a busy publisher. What that gives up: an applied plan proves each op found the value it was planned against, not that the publisher now matches every rule; the next plan converges the rest. The SSP has no compare-and-set, so a write landing between the check and an op is still overwritten. A platform with conditional writes would close that window per op.
 - **Outbox over dual writes.** The event cannot exist without the change, nor the change without the event. Claims use `FOR UPDATE SKIP LOCKED` with a lease, so several replicas can relay without double-claiming.
 - **Hand-rolled HS256 and Prometheus text output** keep the dependency list at one module (pgx). In production I'd expect an RS256/JWKS verifier from the identity provider behind the same `Verifier` interface, and the Prometheus client library.
 

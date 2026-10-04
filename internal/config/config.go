@@ -44,9 +44,12 @@ type ReadFile func(string) ([]byte, error)
 func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 	var errs []error
 	c := Config{
-		ListenAddr:     or(getenv("LISTEN_ADDR"), ":8080"),
-		StoreBackend:   or(getenv("STORE_BACKEND"), "postgres"),
-		RunMigrations:  or(getenv("RUN_MIGRATIONS"), "true") == "true",
+		ListenAddr:   or(getenv("LISTEN_ADDR"), ":8080"),
+		StoreBackend: or(getenv("STORE_BACKEND"), "postgres"),
+		// Off by default: schema changes run as `floorsvc migrate` (the
+		// migrate Job) under a role with DDL rights, which the service's
+		// runtime role does not have. Set true only for local development.
+		RunMigrations:  getenv("RUN_MIGRATIONS") == "true",
 		Issuer:         getenv("AUTH_ISSUER"),
 		Audience:       or(getenv("AUTH_AUDIENCE"), "floorrules"),
 		ShutdownDrain:  5 * time.Second,
@@ -113,6 +116,19 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 			c.ApplyLease, c.ApplyTimeout+c.RecordTimeout))
 	}
 	return c, errors.Join(errs...)
+}
+
+// LoadDatabaseURL reads only DATABASE_URL (or DATABASE_URL_FILE). The
+// migrate command uses it: it needs the migrator's DSN and nothing else.
+func LoadDatabaseURL(getenv Getenv, readFile ReadFile) (string, error) {
+	dsn, err := secretValue(getenv, readFile, "DATABASE_URL")
+	if err != nil {
+		return "", err
+	}
+	if dsn == "" {
+		return "", errors.New("DATABASE_URL (or DATABASE_URL_FILE) is required")
+	}
+	return dsn, nil
 }
 
 // secretValue prefers NAME_FILE over NAME. Error messages name the variable,

@@ -30,3 +30,9 @@ variable "k8s_service_account" {
   type        = string
   default     = "floorsvc"
 }
+
+variable "k8s_migrate_service_account" {
+  description = "Kubernetes ServiceAccount of the migrate Job; must match deploy/k8s."
+  type        = string
+  default     = "floorsvc-migrate"
+}

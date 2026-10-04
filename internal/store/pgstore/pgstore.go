@@ -28,8 +28,15 @@ var _ store.Store = (*Store)(nil)
 // New wraps an existing pool. The caller owns the pool's lifecycle.
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
-// Ping implements store.Store; /readyz uses it.
-func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+// Ping implements store.Store; /readyz uses it. The store is ready when the
+// database answers and has this binary's latest migration applied, so pods
+// stay out of the Service until the migrate Job has run.
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.pool.Ping(ctx); err != nil {
+		return err
+	}
+	return SchemaCurrent(ctx, s.pool)
+}
 
 const uniqueViolation = "23505"
 

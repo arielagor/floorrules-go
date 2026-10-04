@@ -57,3 +57,31 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
+---
+# The migrate Job: no ingress, egress to DNS and the database only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: floorsvc-migrate-allow
+  namespace: floorrules
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: floorsvc-migrate
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 10.20.0.0/16
+      ports:
+        - port: 5432
+          protocol: TCP

@@ -1,0 +1,70 @@
+# Schema migrations run here, never in the serving pods (day-2 review M5).
+# Rollout order for each release:
+#   1. Set the image digest below to the release's digest and apply this Job.
+#   2. Wait: kubectl -n floorrules wait --for=condition=complete job/floorsvc-migrate --timeout=10m
+#   3. Roll the Deployment. New pods stay unready until the schema matches
+#      (pgstore.Ping checks schema_migrations for the binary's latest version).
+# Migrations must stay compatible with the release still serving
+# (expand, then contract in a later release), because old pods keep running
+# against the new schema until the rollout finishes. See RUNBOOK.md.
+# The Job connects as floorsvc_migrator (deploy/sql/roles.sql), which owns
+# the schema; the service's floorsvc_app role cannot change it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: floorsvc-migrate
+  namespace: floorrules
+  labels:
+    app.kubernetes.io/name: floorsvc-migrate
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: floorsvc-migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: floorsvc-migrate
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # Same image as the Deployment; set to the release's digest.
+          image: REGION-docker.pkg.dev/PROJECT_ID/floorrules/floorsvc@sha256:REPLACE_WITH_DIGEST
+          imagePullPolicy: IfNotPresent
+          args: ["migrate"]
+          env:
+            - name: DATABASE_URL_FILE
+              value: /var/run/secrets/floorrules/database-url
+          volumeMounts:
+            - name: secrets
+              mountPath: /var/run/secrets/floorrules
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+            limits:
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+      volumes:
+        - name: secrets
+          secret:
+            # The migrator's DSN only. Never committed.
+            secretName: floorsvc-migrate-secrets
+            defaultMode: 0440

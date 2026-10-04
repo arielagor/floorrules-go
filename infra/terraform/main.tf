@@ -116,3 +116,29 @@ resource "google_secret_manager_secret_iam_member" "database_url_access" {
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.floorsvc.email}"
 }
+
+# --- Migrate Job identity: the only principal that can read the DSN of
+# floorsvc_migrator, the role that owns the schema (deploy/sql/roles.sql). ---
+resource "google_service_account" "floorsvc_migrate" {
+  account_id   = "floorsvc-migrate"
+  display_name = "floorsvc schema migrations"
+}
+
+resource "google_service_account_iam_member" "migrate_workload_identity" {
+  service_account_id = google_service_account.floorsvc_migrate.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.k8s_namespace}/${var.k8s_migrate_service_account}]"
+}
+
+resource "google_secret_manager_secret" "migrate_database_url" {
+  secret_id = "floorsvc-migrate-database-url"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_iam_member" "migrate_database_url_access" {
+  secret_id = google_secret_manager_secret.migrate_database_url.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.floorsvc_migrate.email}"
+}

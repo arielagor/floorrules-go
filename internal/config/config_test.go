@@ -21,8 +21,47 @@ func TestLoad_DefaultsMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ListenAddr != ":8080" || c.Audience != "floorrules" || !c.RunMigrations || c.ShutdownDrain != 5*time.Second {
+	if c.ListenAddr != ":8080" || c.Audience != "floorrules" || c.RunMigrations || c.ShutdownDrain != 5*time.Second {
 		t.Fatalf("defaults wrong: %+v", c)
+	}
+}
+
+// M5 (day-2 review): migrating on startup by default means the runtime
+// database role needs DDL. Schema changes belong to the migrate Job, which
+// runs under its own role; the service opts in only for local development.
+func TestLoad_MigrationsOffByDefault(t *testing.T) {
+	c, err := Load(env(map[string]string{
+		"DATABASE_URL": "postgres://x", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev",
+	}), noFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RunMigrations {
+		t.Fatal("RUN_MIGRATIONS defaults to true: the runtime role would need DDL rights")
+	}
+	c, _ = Load(env(map[string]string{
+		"DATABASE_URL": "postgres://x", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev", "RUN_MIGRATIONS": "true",
+	}), noFiles)
+	if !c.RunMigrations {
+		t.Fatal("RUN_MIGRATIONS=true not honoured")
+	}
+}
+
+func TestLoadDatabaseURL_ForMigrateCommand(t *testing.T) {
+	files := func(p string) ([]byte, error) {
+		if p == "/s/db" {
+			return []byte("postgres://migrator\n"), nil
+		}
+		return nil, errors.New("no such file")
+	}
+	if dsn, err := LoadDatabaseURL(env(map[string]string{"DATABASE_URL_FILE": "/s/db", "DATABASE_URL": "postgres://plain"}), files); err != nil || dsn != "postgres://migrator" {
+		t.Fatalf("file must win: %q, %v", dsn, err)
+	}
+	if _, err := LoadDatabaseURL(env(nil), files); err == nil {
+		t.Fatal("missing DSN accepted")
+	}
+	if _, err := LoadDatabaseURL(env(map[string]string{"DATABASE_URL_FILE": "/nope"}), files); err == nil {
+		t.Fatal("unreadable secret file accepted")
 	}
 }
 

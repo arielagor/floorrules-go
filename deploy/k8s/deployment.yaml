@@ -58,8 +58,10 @@ spec:
               value: ":8080"
             - name: STORE_BACKEND
               value: postgres
+            # Schema changes run in migrate-job.yaml as floorsvc_migrator;
+            # this pod's DSN is floorsvc_app, which has no DDL rights.
             - name: RUN_MIGRATIONS
-              value: "false" # run migrations as a separate Job in a real rollout
+              value: "false"
             - name: AUTH_ISSUER
               value: https://auth.example.internal
             - name: AUTH_AUDIENCE

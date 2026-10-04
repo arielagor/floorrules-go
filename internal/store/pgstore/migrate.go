@@ -3,12 +3,14 @@ package pgstore
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,6 +20,56 @@ var migrationFS embed.FS
 // migrationLockID is an arbitrary constant for pg_advisory_lock, so that when
 // several replicas start at once only one runs migrations.
 const migrationLockID int64 = 0x666c6f6f72 // "floor"
+
+// LatestVersion is the newest embedded migration: the schema this binary
+// expects.
+func LatestVersion() (string, error) {
+	names, err := migrationNames()
+	if err != nil {
+		return "", err
+	}
+	if len(names) == 0 {
+		return "", errors.New("no embedded migrations")
+	}
+	return versionOf(names[len(names)-1]), nil
+}
+
+func migrationNames() ([]string, error) {
+	names, err := fs.Glob(migrationFS, "migrations/*.sql")
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func versionOf(name string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(name, "migrations/"), ".sql")
+}
+
+// SchemaCurrent returns nil if the database has the latest embedded
+// migration applied, and an error naming what is missing otherwise.
+func SchemaCurrent(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) error {
+	want, err := LatestVersion()
+	if err != nil {
+		return err
+	}
+	var have bool
+	err = q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, want).Scan(&have)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42P01" { // undefined_table
+		return fmt.Errorf("schema not migrated: want %s, schema_migrations does not exist", want)
+	}
+	if err != nil {
+		return err
+	}
+	if !have {
+		return fmt.Errorf("schema not migrated: want %s", want)
+	}
+	return nil
+}
 
 // Migrate applies every embedded migration not yet recorded in
 // schema_migrations, each in its own transaction, in filename order.
@@ -42,15 +94,14 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 		return nil, err
 	}
 
-	names, err := fs.Glob(migrationFS, "migrations/*.sql")
+	names, err := migrationNames()
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(names)
 
 	var applied []string
 	for _, name := range names {
-		version := strings.TrimSuffix(strings.TrimPrefix(name, "migrations/"), ".sql")
+		version := versionOf(name)
 		var exists bool
 		if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, version).Scan(&exists); err != nil {
 			return applied, err

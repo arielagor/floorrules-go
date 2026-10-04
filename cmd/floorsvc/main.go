@@ -38,16 +38,50 @@ func main() {
 }
 
 func mainErr() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// `floorsvc migrate` applies the schema and exits. It runs as the
+	// migrate Job under a role with DDL rights; the service itself does not
+	// migrate unless RUN_MIGRATIONS=true (local development).
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		dsn, err := config.LoadDatabaseURL(os.Getenv, os.ReadFile)
+		if err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
+		return migrate(ctx, dsn, log)
+	}
+
 	cfg, err := config.FromOS()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(log)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	return run(ctx, cfg, log, runOpts{})
+}
+
+// migrate applies every pending migration and confirms the schema is at
+// this binary's latest version.
+func migrate(ctx context.Context, dsn string, log *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return errors.New("database: invalid connection settings") // never echo the DSN
+	}
+	defer pool.Close()
+	applied, err := pgstore.Migrate(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("migrate: %w (applied before the failure: %v)", err, applied)
+	}
+	if err := pgstore.SchemaCurrent(ctx, pool); err != nil {
+		return err
+	}
+	latest, _ := pgstore.LatestVersion()
+	log.Info("migrations", "applied", applied, "schema", latest)
+	return nil
 }
 
 // runOpts lets tests inject collaborators. Zero values mean production

@@ -49,7 +49,7 @@ func New() *Store {
 }
 
 // Ping implements store.Store.
-func (s *Store) Ping(context.Context) error { return nil }
+func (s *Store) Ping(ctx context.Context) error { return ctx.Err() }
 
 func (s *Store) auditLocked(actor, pub, action, entity string, detail any) {
 	raw, _ := json.Marshal(detail)
@@ -67,7 +67,10 @@ func (s *Store) emitLocked(topic string, payload any) {
 }
 
 // CreateRule implements store.Store.
-func (s *Store) CreateRule(_ context.Context, r domain.Rule) (domain.Rule, error) {
+func (s *Store) CreateRule(ctx context.Context, r domain.Rule) (domain.Rule, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return domain.Rule{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, existing := range s.rules {
@@ -88,7 +91,10 @@ func (s *Store) CreateRule(_ context.Context, r domain.Rule) (domain.Rule, error
 }
 
 // DisableRule implements store.Store.
-func (s *Store) DisableRule(_ context.Context, publisherID, ruleID, actor string) (domain.Rule, error) {
+func (s *Store) DisableRule(ctx context.Context, publisherID, ruleID, actor string) (domain.Rule, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return domain.Rule{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.rules[ruleID]
@@ -105,7 +111,10 @@ func (s *Store) DisableRule(_ context.Context, publisherID, ruleID, actor string
 }
 
 // ListRules implements store.Store. Results are ordered by creation time.
-func (s *Store) ListRules(_ context.Context, publisherID string) ([]domain.Rule, error) {
+func (s *Store) ListRules(ctx context.Context, publisherID string) ([]domain.Rule, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []domain.Rule{}
@@ -120,7 +129,10 @@ func (s *Store) ListRules(_ context.Context, publisherID string) ([]domain.Rule,
 }
 
 // CreatePlan implements store.Store.
-func (s *Store) CreatePlan(_ context.Context, p domain.Plan) error {
+func (s *Store) CreatePlan(ctx context.Context, p domain.Plan) error {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.createPlanLocked(p)
@@ -139,7 +151,10 @@ func (s *Store) createPlanLocked(p domain.Plan) {
 }
 
 // GetPlan implements store.Store.
-func (s *Store) GetPlan(_ context.Context, publisherID, planID string) (domain.Plan, error) {
+func (s *Store) GetPlan(ctx context.Context, publisherID, planID string) (domain.Plan, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return domain.Plan{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.plans[planID]
@@ -150,7 +165,10 @@ func (s *Store) GetPlan(_ context.Context, publisherID, planID string) (domain.P
 }
 
 // GetAttempt implements store.Store.
-func (s *Store) GetAttempt(_ context.Context, key string) (domain.ApplyAttempt, error) {
+func (s *Store) GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return domain.ApplyAttempt{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a, ok := s.attempts[key]
@@ -161,7 +179,10 @@ func (s *Store) GetAttempt(_ context.Context, key string) (domain.ApplyAttempt, 
 }
 
 // BeginApply implements store.Store.
-func (s *Store) BeginApply(_ context.Context, a domain.ApplyAttempt, leaseCutoff time.Time) (domain.ApplyAttempt, bool, error) {
+func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCutoff time.Time) (domain.ApplyAttempt, bool, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return domain.ApplyAttempt{}, false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.attempts[a.IdempotencyKey]; ok {
@@ -188,7 +209,10 @@ func (s *Store) BeginApply(_ context.Context, a domain.ApplyAttempt, leaseCutoff
 }
 
 // FinishApply implements store.Store.
-func (s *Store) FinishApply(_ context.Context, publisherID, key, actor string, result domain.ApplyResult) error {
+func (s *Store) FinishApply(ctx context.Context, publisherID, key, actor string, result domain.ApplyResult) error {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a, ok := s.attempts[key]
@@ -216,7 +240,10 @@ func (s *Store) FinishApply(_ context.Context, publisherID, key, actor string, r
 }
 
 // ListAudit implements store.Store, newest first.
-func (s *Store) ListAudit(_ context.Context, publisherID string, limit int) ([]domain.AuditEntry, error) {
+func (s *Store) ListAudit(ctx context.Context, publisherID string, limit int) ([]domain.AuditEntry, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []domain.AuditEntry{}
@@ -229,7 +256,10 @@ func (s *Store) ListAudit(_ context.Context, publisherID string, limit int) ([]d
 }
 
 // ClaimOutbox implements store.Store, oldest first.
-func (s *Store) ClaimOutbox(_ context.Context, limit int, lease time.Duration) ([]domain.Event, error) {
+func (s *Store) ClaimOutbox(ctx context.Context, limit int, lease time.Duration) ([]domain.Event, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -248,7 +278,10 @@ func (s *Store) ClaimOutbox(_ context.Context, limit int, lease time.Duration) (
 }
 
 // MarkOutboxSent implements store.Store.
-func (s *Store) MarkOutboxSent(_ context.Context, ids []string) error {
+func (s *Store) MarkOutboxSent(ctx context.Context, ids []string) error {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	want := make(map[string]bool, len(ids))
@@ -264,7 +297,10 @@ func (s *Store) MarkOutboxSent(_ context.Context, ids []string) error {
 }
 
 // CreatePlanForEvent implements store.Store.
-func (s *Store) CreatePlanForEvent(_ context.Context, consumer, eventID string, p domain.Plan) (bool, error) {
+func (s *Store) CreatePlanForEvent(ctx context.Context, consumer, eventID string, p domain.Plan) (bool, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := consumer + "/" + eventID

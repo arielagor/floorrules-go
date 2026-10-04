@@ -43,9 +43,13 @@ type Config struct {
 	Retry        adapter.RetryPolicy
 	ApplyLease   time.Duration // after this, an in_progress attempt is presumed abandoned
 	ApplyTimeout time.Duration // overall budget for executing one plan
-	Now          func() time.Time
-	Log          *slog.Logger
-	Metrics      *metrics.Registry
+	// RecordTimeout is the separate budget for writing an apply's result.
+	// It starts after execution, so a slow platform that uses the whole
+	// ApplyTimeout cannot also prevent the result from being recorded.
+	RecordTimeout time.Duration
+	Now           func() time.Time
+	Log           *slog.Logger
+	Metrics       *metrics.Registry
 }
 
 // Service is safe for concurrent use.
@@ -68,6 +72,9 @@ func New(st store.Store, ssp adapter.SSP, cfg Config) *Service {
 	}
 	if cfg.ApplyTimeout == 0 {
 		cfg.ApplyTimeout = 2 * time.Minute
+	}
+	if cfg.RecordTimeout == 0 {
+		cfg.RecordTimeout = 10 * time.Second
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -215,15 +222,18 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 
 	// 4. Execute, detached from the caller: a client disconnect must not
 	// abandon a plan halfway. The apply has its own deadline instead.
-	execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ApplyTimeout)
-	defer cancel()
+	execCtx, cancelExec := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ApplyTimeout)
 	result := s.execute(execCtx, plan)
+	cancelExec()
 
-	if err := s.store.FinishApply(execCtx, publisherID, key, actor, result); err != nil {
-		// The platform changes happened but the record did not commit. The
-		// attempt stays in_progress until its lease expires; a retry with the
-		// same key then re-runs, which the drift check turns into "stale".
+	// 5. Record on a fresh budget. execCtx may be exhausted by now (a slow
+	// platform uses all of it), and writing the result on it would lose the
+	// audit row and event for changes that did happen.
+	recCtx, cancelRec := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.RecordTimeout)
+	defer cancelRec()
+	if err := s.store.FinishApply(recCtx, publisherID, key, actor, result); err != nil {
 		s.cfg.Log.Error("apply finished but not recorded", "plan_id", planID, "key", key, "err", err)
+		s.cfg.Metrics.Inc("apply_record_failures_total")
 		return domain.ApplyResult{}, false, err
 	}
 	s.cfg.Metrics.Inc("apply_total", "status", string(result.Status))

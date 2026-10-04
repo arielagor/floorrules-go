@@ -284,15 +284,80 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 	}
 }
 
+// disconnectingSSP cancels the HTTP request's context on the first write,
+// i.e. the client goes away after the apply has claimed its key.
+type disconnectingSSP struct {
+	*adapter.Mock
+	cancel context.CancelFunc
+}
+
+func (d disconnectingSSP) SetFloor(ctx context.Context, pub string, f domain.PlatformFloor) error {
+	d.cancel()
+	return d.Mock.SetFloor(ctx, pub, f)
+}
+
+// A disconnect after the claim must not abandon the apply halfway. (Before the
+// day-2 review this test cancelled the request before calling ApplyPlan and
+// passed only because the in-memory fake ignored its context; against
+// Postgres, pre-claim reads correctly fail on a dead request.)
 func TestApply_SurvivesClientDisconnect(t *testing.T) {
-	h := newHarness(t)
-	h.rule(t, "ctv", "US", 2_000_000)
-	p := h.plan(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the HTTP client has gone away
-	res, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "detached-key1", false)
+	defer cancel()
+	st := memstore.New()
+	retry := adapter.DefaultRetryPolicy()
+	retry.Sleep = func(context.Context, time.Duration) error { return nil }
+	svc := New(st, disconnectingSSP{Mock: adapter.NewMock(), cancel: cancel}, Config{Retry: retry})
+	h := harness{svc: svc, st: st}
+	h.rule(t, "ctv", "US", 2_000_000)
+	h.rule(t, "ctv", "CA", 2_000_000)
+	p := h.plan(t)
+	res, _, err := svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "detached-key1", false)
 	if err != nil || res.Status != domain.PlanApplied {
 		t.Fatalf("apply = %+v, %v; want it to finish despite the cancelled request", res, err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test bug: the request context was never cancelled")
+	}
+}
+
+// hangingSSP is a platform that answers ListFloors but never answers
+// SetFloor: each write blocks until the caller's deadline. It is the most
+// common real failure, a slow SSP that eats the whole apply budget.
+type hangingSSP struct{ *adapter.Mock }
+
+func (hangingSSP) SetFloor(ctx context.Context, _ string, _ domain.PlatformFloor) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// H1 (day-2 review): the result used to be written on the apply's own,
+// already-expired context, so a slow SSP left no audit row, no event and an
+// attempt stuck in_progress.
+func TestApply_SlowPlatformStillRecordsResult(t *testing.T) {
+	st := memstore.New()
+	m := metrics.New()
+	retry := adapter.DefaultRetryPolicy()
+	retry.PerAttempt = 0 // one attempt runs to the overall deadline
+	retry.Sleep = func(context.Context, time.Duration) error { return nil }
+	svc := New(st, hangingSSP{adapter.NewMock()}, Config{Retry: retry, Metrics: m, ApplyTimeout: 50 * time.Millisecond})
+	h := harness{svc: svc, st: st, m: m}
+	h.rule(t, "ctv", "US", 2_000_000)
+	p := h.plan(t)
+
+	res, _, err := svc.ApplyPlan(context.Background(), "user:ops", pub, p.ID, "slow-ssp-key-1", false)
+	if err != nil {
+		t.Fatalf("apply returned %v; the outcome must be recorded, not lost", err)
+	}
+	if res.Status != domain.PlanFailed {
+		t.Fatalf("status = %s, want failed", res.Status)
+	}
+	a, err := st.GetAttempt(context.Background(), "slow-ssp-key-1")
+	if err != nil || a.Status != domain.AttemptFailed || a.Result == nil {
+		t.Fatalf("attempt = %+v, %v; want failed with a stored result", a, err)
+	}
+	audit, _ := st.ListAudit(context.Background(), pub, 1)
+	if len(audit) != 1 || audit[0].Action != "plan.apply" {
+		t.Fatalf("newest audit entry = %+v, want plan.apply", audit)
 	}
 }
 

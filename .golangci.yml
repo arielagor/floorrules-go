@@ -38,4 +38,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/arielagor/floorrules
+        - github.com/arielagor/floorrules-go

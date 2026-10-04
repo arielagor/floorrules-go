@@ -1,4 +1,4 @@
-module github.com/arielagor/floorrules
+module github.com/arielagor/floorrules-go
 
 go 1.27.0
 

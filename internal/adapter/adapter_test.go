@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/domain"
 )
 
 // fakeTimeout satisfies net.Error with Timeout() == true.

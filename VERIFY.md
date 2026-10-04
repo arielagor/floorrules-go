@@ -22,7 +22,7 @@ The PATH for every command: `C:\Program Files\Go\bin`, `%USERPROFILE%\go\bin`.
 | syft v1.54.0 SBOM | SPDX-2.3, 14 packages |
 | pre-commit hook | passes; rejects a misformatted file |
 | Container smoke test | all assertions below hold |
-| GitHub Actions | **not run**: the repo has no remote by design. Each CI step was run locally as shown here. |
+| GitHub Actions | **passed**: run 37177854018 on commit 4a621bd, https://github.com/arielagor/floorrules-go/actions/runs/37177854018. All jobs passed. Each CI step and its output are also documented locally above. |
 | cosign signing | **not run**: placeholder step only, needs a registry and GCP Workload Identity Federation. |
 
 ## Static checks

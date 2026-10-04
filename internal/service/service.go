@@ -14,12 +14,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/adapter"
-	"github.com/arielagor/floorrules/internal/domain"
-	"github.com/arielagor/floorrules/internal/events"
-	"github.com/arielagor/floorrules/internal/id"
-	"github.com/arielagor/floorrules/internal/metrics"
-	"github.com/arielagor/floorrules/internal/store"
+	"github.com/arielagor/floorrules-go/internal/adapter"
+	"github.com/arielagor/floorrules-go/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/events"
+	"github.com/arielagor/floorrules-go/internal/id"
+	"github.com/arielagor/floorrules-go/internal/metrics"
+	"github.com/arielagor/floorrules-go/internal/store"
 )
 
 // Errors the API maps to HTTP statuses.

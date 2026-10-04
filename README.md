@@ -85,4 +85,4 @@ git config core.hooksPath scripts                               # enable the pre
 - A real broker (Pub/Sub). The relay talks to a `Publisher` interface, and the in-memory queue stands in.
 - Multi-currency, rule versioning/edit-in-place (rules are disabled and replaced), and a UI.
 - The migrations run at startup behind an advisory lock; a real rollout would use a separate Job.
-- CI has never executed on GitHub (the repo has no remote). Each step was run locally instead; see VERIFY.md.
+- The repo is public and CI runs on GitHub Actions. The first run passed all jobs (run 37177854018 on commit 4a621bd, https://github.com/arielagor/floorrules-go/actions/runs/37177854018). Each step and its output are also documented locally in VERIFY.md.

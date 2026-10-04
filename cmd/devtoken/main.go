@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/auth"
+	"github.com/arielagor/floorrules-go/internal/auth"
 )
 
 func main() {

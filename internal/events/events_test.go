@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/domain"
-	"github.com/arielagor/floorrules/internal/id"
-	"github.com/arielagor/floorrules/internal/metrics"
-	"github.com/arielagor/floorrules/internal/store/memstore"
+	"github.com/arielagor/floorrules-go/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/id"
+	"github.com/arielagor/floorrules-go/internal/metrics"
+	"github.com/arielagor/floorrules-go/internal/store/memstore"
 )
 
 var quiet = slog.New(slog.DiscardHandler)

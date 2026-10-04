@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/domain"
-	"github.com/arielagor/floorrules/internal/metrics"
-	"github.com/arielagor/floorrules/internal/store"
+	"github.com/arielagor/floorrules-go/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/metrics"
+	"github.com/arielagor/floorrules-go/internal/store"
 )
 
 // Message is one delivered event. Delivery is at-least-once: a consumer can

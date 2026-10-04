@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/arielagor/floorrules/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/domain"
 )
 
 // Mock is an in-memory SSP with scripted faults. It is safe for concurrent use.

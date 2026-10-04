@@ -18,11 +18,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/auth"
-	"github.com/arielagor/floorrules/internal/domain"
-	"github.com/arielagor/floorrules/internal/id"
-	"github.com/arielagor/floorrules/internal/metrics"
-	"github.com/arielagor/floorrules/internal/service"
+	"github.com/arielagor/floorrules-go/internal/auth"
+	"github.com/arielagor/floorrules-go/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/id"
+	"github.com/arielagor/floorrules-go/internal/metrics"
+	"github.com/arielagor/floorrules-go/internal/service"
 )
 
 const (

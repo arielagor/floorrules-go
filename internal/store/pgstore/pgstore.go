@@ -13,9 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/arielagor/floorrules/internal/domain"
-	"github.com/arielagor/floorrules/internal/id"
-	"github.com/arielagor/floorrules/internal/store"
+	"github.com/arielagor/floorrules-go/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/id"
+	"github.com/arielagor/floorrules-go/internal/store"
 )
 
 // Store wraps a pgx connection pool.

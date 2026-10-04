@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/domain"
 )
 
 // SSP is the minimal platform contract the service needs. SetFloor and

@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arielagor/floorrules/internal/adapter"
-	"github.com/arielagor/floorrules/internal/auth"
-	"github.com/arielagor/floorrules/internal/domain"
-	"github.com/arielagor/floorrules/internal/metrics"
-	"github.com/arielagor/floorrules/internal/service"
-	"github.com/arielagor/floorrules/internal/store"
-	"github.com/arielagor/floorrules/internal/store/memstore"
+	"github.com/arielagor/floorrules-go/internal/adapter"
+	"github.com/arielagor/floorrules-go/internal/auth"
+	"github.com/arielagor/floorrules-go/internal/domain"
+	"github.com/arielagor/floorrules-go/internal/metrics"
+	"github.com/arielagor/floorrules-go/internal/service"
+	"github.com/arielagor/floorrules-go/internal/store"
+	"github.com/arielagor/floorrules-go/internal/store/memstore"
 )
 
 var key = []byte("test-only-hmac-key-0123456789abcdef")

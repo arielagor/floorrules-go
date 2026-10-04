@@ -15,9 +15,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/arielagor/floorrules/internal/store"
-	"github.com/arielagor/floorrules/internal/store/pgstore"
-	"github.com/arielagor/floorrules/internal/store/storetest"
+	"github.com/arielagor/floorrules-go/internal/store"
+	"github.com/arielagor/floorrules-go/internal/store/pgstore"
+	"github.com/arielagor/floorrules-go/internal/store/storetest"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {

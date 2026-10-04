@@ -19,6 +19,11 @@ variable "subnetwork" {
   type        = string
 }
 
+variable "master_authorized_cidr" {
+  description = "The only range allowed to reach the GKE control plane endpoint (operators' VPN or CI egress), e.g. 203.0.113.0/28."
+  type        = string
+}
+
 variable "k8s_namespace" {
   description = "Namespace the service runs in; must match deploy/k8s."
   type        = string

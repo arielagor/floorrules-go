@@ -22,7 +22,8 @@ spec:
         app.kubernetes.io/name: floorsvc
     spec:
       serviceAccountName: floorsvc
-      # Workload Identity uses the GKE metadata server, not a mounted KSA token.
+      # The process calls no Kubernetes or Google API. The CSI driver gets
+      # its own token for this KSA from the kubelet to read Secret Manager.
       automountServiceAccountToken: false
       # On SIGTERM the process fails readiness (SHUTDOWN_DRAIN), stops the
       # HTTP server, then waits for in-flight applies to record their result
@@ -130,12 +131,14 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 2
       volumes:
+        # Read from Secret Manager at mount time by the GKE add-on's CSI
+        # driver (secretproviderclass.yaml); no Kubernetes Secret exists.
         - name: secrets
-          secret:
-            # Populated from Secret Manager (e.g. External Secrets or the
-            # Secret Manager CSI driver); never committed.
-            secretName: floorsvc-secrets
-            defaultMode: 0400
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: floorsvc-secrets
         - name: tmp
           emptyDir:
             sizeLimit: 32Mi

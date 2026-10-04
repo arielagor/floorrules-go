@@ -31,7 +31,7 @@ func TestLoad_DefaultsMemory(t *testing.T) {
 // runs under its own role; the service opts in only for local development.
 func TestLoad_MigrationsOffByDefault(t *testing.T) {
 	c, err := Load(env(map[string]string{
-		"DATABASE_URL": "postgres://x", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev",
+		"DATABASE_URL": "postgres://x?sslmode=verify-full", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev",
 	}), noFiles)
 	if err != nil {
 		t.Fatal(err)
@@ -40,21 +40,61 @@ func TestLoad_MigrationsOffByDefault(t *testing.T) {
 		t.Fatal("RUN_MIGRATIONS defaults to true: the runtime role would need DDL rights")
 	}
 	c, _ = Load(env(map[string]string{
-		"DATABASE_URL": "postgres://x", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev", "RUN_MIGRATIONS": "true",
+		"DATABASE_URL": "postgres://x?sslmode=verify-full", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev", "RUN_MIGRATIONS": "true",
 	}), noFiles)
 	if !c.RunMigrations {
 		t.Fatal("RUN_MIGRATIONS=true not honoured")
 	}
 }
 
+// M7 (day-2 review): Cloud SQL requires TLS, but a DSN without sslmode
+// makes pgx use `prefer`, which encrypts without checking who answered.
+// The service must verify the server certificate unless told, explicitly,
+// that this is a local database.
+func TestLoad_DatabaseMustVerifyServerCertificate(t *testing.T) {
+	base := map[string]string{"AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev"}
+	with := func(kv ...string) Getenv {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return env(m)
+	}
+	for _, dsn := range []string{
+		"postgres://app@10.20.0.3/floorrules",
+		"postgres://app@10.20.0.3/floorrules?sslmode=prefer",
+		"postgres://app@10.20.0.3/floorrules?sslmode=require",
+		"host=10.20.0.3 user=app dbname=floorrules",
+	} {
+		if _, err := Load(with("DATABASE_URL", dsn), noFiles); err == nil || !strings.Contains(err.Error(), "sslmode") {
+			t.Errorf("DSN %q accepted without server verification (err=%v)", dsn, err)
+		}
+	}
+	for _, dsn := range []string{
+		"postgres://app@10.20.0.3/floorrules?sslmode=verify-ca&sslrootcert=/var/run/secrets/floorrules/server-ca.pem",
+		"postgres://app@db.internal/floorrules?sslmode=verify-full",
+		"host=10.20.0.3 user=app sslmode=verify-full",
+	} {
+		if _, err := Load(with("DATABASE_URL", dsn), noFiles); err != nil {
+			t.Errorf("DSN %q rejected: %v", dsn, err)
+		}
+	}
+	if _, err := Load(with("DATABASE_URL", "postgres://localhost/x?sslmode=disable", "DATABASE_TLS_UNVERIFIED_OK", "true"), noFiles); err != nil {
+		t.Errorf("explicit local-development opt-out rejected: %v", err)
+	}
+}
+
 func TestLoadDatabaseURL_ForMigrateCommand(t *testing.T) {
 	files := func(p string) ([]byte, error) {
 		if p == "/s/db" {
-			return []byte("postgres://migrator\n"), nil
+			return []byte("postgres://migrator?sslmode=verify-full\n"), nil
 		}
 		return nil, errors.New("no such file")
 	}
-	if dsn, err := LoadDatabaseURL(env(map[string]string{"DATABASE_URL_FILE": "/s/db", "DATABASE_URL": "postgres://plain"}), files); err != nil || dsn != "postgres://migrator" {
+	if dsn, err := LoadDatabaseURL(env(map[string]string{"DATABASE_URL_FILE": "/s/db", "DATABASE_URL": "postgres://plain"}), files); err != nil || dsn != "postgres://migrator?sslmode=verify-full" {
 		t.Fatalf("file must win: %q, %v", dsn, err)
 	}
 	if _, err := LoadDatabaseURL(env(nil), files); err == nil {
@@ -68,7 +108,7 @@ func TestLoadDatabaseURL_ForMigrateCommand(t *testing.T) {
 func TestLoad_SecretFilesTakePrecedence(t *testing.T) {
 	files := map[string]string{
 		"/var/run/secrets/hmac": secret32 + "\n",
-		"/var/run/secrets/db":   "postgres://u:p@db/floor\n",
+		"/var/run/secrets/db":   "postgres://u:p@db/floor?sslmode=verify-full\n",
 	}
 	read := func(p string) ([]byte, error) {
 		if v, ok := files[p]; ok {
@@ -84,7 +124,7 @@ func TestLoad_SecretFilesTakePrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(c.HMACSecret) != secret32 || c.DatabaseURL != "postgres://u:p@db/floor" {
+	if string(c.HMACSecret) != secret32 || c.DatabaseURL != "postgres://u:p@db/floor?sslmode=verify-full" {
 		t.Fatalf("secret files not used or not trimmed: %+v", c)
 	}
 	if c.LogLevel != slog.LevelDebug || c.ShutdownDrain != 2*time.Second {

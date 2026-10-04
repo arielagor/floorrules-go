@@ -58,7 +58,7 @@ curl -s -X POST localhost:8080/v1/publishers/acme-tv/plans/$PLAN/apply \
   -H 'Idempotency-Key: demo-apply-0001' -d '{"acknowledge_risky":false}'
 ```
 
-With Postgres: `STORE_BACKEND=postgres DATABASE_URL=postgres://... RUN_MIGRATIONS=true`. Prefer `DATABASE_URL_FILE` / `AUTH_HMAC_SECRET_FILE` pointing at mounted secrets; a `_FILE` variable wins over the plain one.
+With Postgres: `STORE_BACKEND=postgres DATABASE_URL=postgres://... RUN_MIGRATIONS=true`. The service refuses a DSN whose `sslmode` is not `verify-ca` or `verify-full`; for a local database without TLS add `DATABASE_TLS_UNVERIFIED_OK=true`. Prefer `DATABASE_URL_FILE` / `AUTH_HMAC_SECRET_FILE` pointing at mounted secrets; a `_FILE` variable wins over the plain one.
 
 Tests:
 

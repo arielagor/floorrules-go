@@ -135,3 +135,4 @@ jobs:
         run: |
           echo "TODO: authenticate to GCP via WIF, push to \$REGION-docker.pkg.dev/\$PROJECT/floorrules/floorsvc"
           echo "TODO: cosign sign --yes \$IMAGE@\$DIGEST && cosign attest --yes --type spdxjson --predicate sbom.spdx.json \$IMAGE@\$DIGEST"
+          echo "TODO: gcloud container binauthz attestations sign-and-create --artifact-url=\$IMAGE@\$DIGEST --attestor=floorrules-ci --keyversion=\$KEY_VERSION (terraform output binauthz_signing_key_version); the cluster's policy admits only attested digests"

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -84,6 +85,8 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 			errs = append(errs, err)
 		} else if c.DatabaseURL == "" {
 			errs = append(errs, errors.New("DATABASE_URL (or DATABASE_URL_FILE) is required for STORE_BACKEND=postgres"))
+		} else if err := requireVerifiedTLS(getenv, c.DatabaseURL); err != nil {
+			errs = append(errs, err)
 		}
 	case "memory":
 	default:
@@ -133,7 +136,51 @@ func LoadDatabaseURL(getenv Getenv, readFile ReadFile) (string, error) {
 	if dsn == "" {
 		return "", errors.New("DATABASE_URL (or DATABASE_URL_FILE) is required")
 	}
+	if err := requireVerifiedTLS(getenv, dsn); err != nil {
+		return "", err
+	}
 	return dsn, nil
+}
+
+// requireVerifiedTLS rejects a DSN that would talk to Postgres without
+// checking the server certificate. pgx defaults to sslmode=prefer, which
+// encrypts but accepts any certificate, and `require` is no better: both
+// lose to anyone who can answer on the database address. Only verify-ca
+// (with sslrootcert, the Cloud SQL server CA) and verify-full pass.
+// DATABASE_TLS_UNVERIFIED_OK=true is the explicit opt-out for a local
+// database; nothing in deploy/ sets it. Errors never include the DSN.
+func requireVerifiedTLS(getenv Getenv, dsn string) error {
+	if getenv("DATABASE_TLS_UNVERIFIED_OK") == "true" {
+		return nil
+	}
+	mode := sslMode(dsn)
+	if mode == "" {
+		mode = getenv("PGSSLMODE")
+	}
+	switch mode {
+	case "verify-ca", "verify-full":
+		return nil
+	case "":
+		mode = "unset, so prefer"
+	}
+	return fmt.Errorf("DATABASE_URL: sslmode is %s; use verify-ca or verify-full (or DATABASE_TLS_UNVERIFIED_OK=true for a local database)", mode)
+}
+
+// sslMode extracts sslmode from a URL or key=value connection string.
+func sslMode(dsn string) string {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return ""
+		}
+		return u.Query().Get("sslmode")
+	}
+	for _, field := range strings.Fields(dsn) {
+		if v, ok := strings.CutPrefix(field, "sslmode="); ok {
+			return strings.Trim(v, `'"`)
+		}
+	}
+	return ""
 }
 
 // secretValue prefers NAME_FILE over NAME. Error messages name the variable,

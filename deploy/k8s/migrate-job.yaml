@@ -63,8 +63,11 @@ spec:
               memory: 128Mi
               ephemeral-storage: 64Mi
       volumes:
+        # The migrator's DSN and the server CA, from Secret Manager through
+        # the GKE add-on's CSI driver (secretproviderclass.yaml).
         - name: secrets
-          secret:
-            # The migrator's DSN only. Never committed.
-            secretName: floorsvc-migrate-secrets
-            defaultMode: 0440
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: floorsvc-migrate-secrets

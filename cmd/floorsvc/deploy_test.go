@@ -54,6 +54,22 @@ func TestNetworkPolicyAdmitsLoadBalancerAndScraper(t *testing.T) {
 	}
 }
 
+// L9 (day-2 review): floorsvc-allow opened egress to 169.254.169.252:988,
+// the metadata-server address GKE documents for clusters without Dataplane
+// V2. Autopilot runs Dataplane V2, where the address is 169.254.169.254:80,
+// so the rule was wrong. It is also unneeded: no code in the binary calls a
+// Google API, and since M7 the Secret Manager CSI driver fetches secrets on
+// the node before the container starts. The pods get no metadata access.
+func TestPodsHaveNoMetadataServerEgress(t *testing.T) {
+	for _, name := range []string{"floorsvc-allow", "floorsvc-migrate-allow"} {
+		for line := range strings.SplitSeq(manifestDoc(t, "networkpolicy.yaml", name), "\n") {
+			if l := strings.TrimSpace(line); !strings.HasPrefix(l, "#") && strings.Contains(l, "169.254.") {
+				t.Errorf("%s allows egress to a link-local metadata address: %s", name, l)
+			}
+		}
+	}
+}
+
 // The Deployment's grace period must cover the whole shutdown sequence in
 // run(): readiness drain, then the longest possible apply (execution plus
 // recording). Kubernetes sends SIGKILL when it runs out, which is exactly

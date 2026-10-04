@@ -67,13 +67,13 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
-    # GKE metadata server, needed for Workload Identity tokens.
-    - to:
-        - ipBlock:
-            cidr: 169.254.169.252/32
-      ports:
-        - port: 988
-          protocol: TCP
+    # No metadata-server egress. Nothing in the binary calls a Google API,
+    # and the Secret Manager CSI driver fetches secrets on the node before
+    # the container starts. If a future change adds a Google client library,
+    # Autopilot (Dataplane V2) needs 169.254.169.254/32 on TCP 80; the
+    # 169.254.169.252/32:988 rule is for clusters without Dataplane V2
+    # (docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/authentication,
+    # checked 2026-10-04).
     # SSP / ad-server APIs over HTTPS. Narrow to egress-gateway IPs in a real cluster.
     - ports:
         - port: 443

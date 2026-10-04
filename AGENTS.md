@@ -36,7 +36,7 @@ A change is done only when all of these hold, and the evidence is in your summar
 7. A behaviour change has a test that failed before the change. Say which.
 8. If deploy files changed: `kubeconform -strict deploy/k8s/` and `terraform validate` pass.
 
-The pre-commit hook (`git config core.hooksPath scripts`) runs 1, 2, 3 (if installed), a non-race 4, and 6.
+The pre-commit hook (`git config core.hooksPath scripts`) runs 1, 2, 3, a non-race 4, and 6. A missing tool fails the hook; nothing is skipped.
 
 ## What an agent may NOT do
 

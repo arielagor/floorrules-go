@@ -438,3 +438,43 @@ func TestRejectedTokenReasonIsLoggedNotReturned(t *testing.T) {
 		t.Fatalf("no log line with the request id and the reason; logs:\n%s", e.logs.String())
 	}
 }
+
+// L6 (day-2 review): recoverer sat outside accessLog, so a panic unwound
+// through accessLog before anything was recorded. The request that most
+// needed an access log line and a 5xx count got neither, and the panic log
+// had no request id because requestID sat inside it too.
+func TestPanicStillCountsAndLogs(t *testing.T) {
+	logs := &bytes.Buffer{}
+	m := metrics.New()
+	h := NewHandler(Deps{Verifier: panicVerifier{}, Log: slog.New(slog.NewJSONHandler(logs, nil)), Metrics: m, Ready: &atomic.Bool{}})
+	req := httptest.NewRequest("GET", "/v1/publishers/acme-tv/rules", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	req.Header.Set("X-Request-ID", "rid-l6")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if got := m.Get("http_requests_total", "route", "GET /v1/publishers/{pub}/rules", "code", "500"); got != 1 {
+		t.Errorf(`http_requests_total{code="500"} = %v, want 1`, got)
+	}
+	var accessLine, panicLine bool
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, `"msg":"http request"`) && strings.Contains(line, `"status":500`) {
+			accessLine = true
+		}
+		if strings.Contains(line, `"msg":"panic"`) && strings.Contains(line, `"rid-l6"`) {
+			panicLine = true
+		}
+	}
+	if !accessLine {
+		t.Errorf("no access log line for the panicking request; logs:\n%s", logs.String())
+	}
+	if !panicLine {
+		t.Errorf("panic log line has no request id; logs:\n%s", logs.String())
+	}
+}
+
+type panicVerifier struct{}
+
+func (panicVerifier) Verify(context.Context, string) (auth.Principal, error) { panic("verifier bug") }

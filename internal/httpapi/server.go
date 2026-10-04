@@ -61,7 +61,11 @@ func NewHandler(d Deps) http.Handler {
 	mux.Handle("POST /v1/publishers/{pub}/plans/{id}/apply", s.authed(auth.ScopePlansApply, s.applyPlan))
 	mux.Handle("GET /v1/publishers/{pub}/audit", s.authed(auth.ScopeAuditRead, s.listAudit))
 
-	return s.recoverer(s.requestID(s.accessLog(mux)))
+	// Order matters. requestID is outermost so every later layer can log
+	// the id; recoverer is innermost so a panic becomes a 500 before it
+	// unwinds through accessLog, which then counts and logs it like any
+	// other response.
+	return s.requestID(s.accessLog(s.recoverer(mux)))
 }
 
 // ---- middleware ----

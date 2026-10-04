@@ -27,7 +27,7 @@ import (
 var (
 	ErrNotFound              = store.ErrNotFound
 	ErrConflict              = store.ErrConflict
-	ErrPlanNotPending        = errors.New("plan is not pending; compute a new plan")
+	ErrPlanNotPending        = store.ErrPlanNotPending
 	ErrRiskyNotAcknowledged  = errors.New("plan contains risky ops; resend with acknowledge_risky=true after review")
 	ErrApplyInProgress       = errors.New("an apply for this plan or key is already in progress")
 	ErrIdempotencyKeyReused  = errors.New("idempotency key was already used for a different request")

@@ -187,6 +187,10 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
+	plan, ok := s.plans[a.PlanID]
+	if !ok {
+		return domain.ApplyAttempt{}, false, store.ErrNotFound
+	}
 	if existing, ok := s.attempts[a.IdempotencyKey]; ok {
 		if existing.Status == domain.AttemptInProgress && existing.RequestHash == a.RequestHash &&
 			existing.StartedAt.Before(now.Add(-lease)) {
@@ -198,6 +202,9 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 		}
 		existing.Token = "" // only the claimant gets a usable token
 		return existing, false, nil
+	}
+	if plan.Status != domain.PlanPending {
+		return domain.ApplyAttempt{}, false, store.ErrPlanNotPending
 	}
 	for _, other := range s.attempts {
 		if other.PlanID == a.PlanID && other.Status == domain.AttemptInProgress {
@@ -241,8 +248,10 @@ func (s *Store) FinishApply(ctx context.Context, publisherID string, claim domai
 	a.Result = &res
 	a.FinishedAt = &now
 	s.attempts[key] = a
-	p.Status = result.Status
-	s.plans[p.ID] = p
+	if p.Status == domain.PlanPending { // a terminal status is never overwritten
+		p.Status = result.Status
+		s.plans[p.ID] = p
+	}
 	s.auditLocked(actor, publisherID, "plan.apply", p.ID, map[string]any{"status": result.Status, "idempotency_key": key})
 	s.emitLocked(domain.TopicPlanApplied, map[string]any{"publisher_id": publisherID, "plan_id": p.ID, "status": result.Status})
 	return nil

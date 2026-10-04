@@ -19,6 +19,9 @@ var (
 	ErrConflict = errors.New("an active rule already exists for this segment")
 	// ErrPlanBusy means a different idempotency key is already applying the plan.
 	ErrPlanBusy = errors.New("another apply of this plan is in progress")
+	// ErrPlanNotPending means the plan has already been applied (or failed,
+	// or gone stale); a new claim on it is refused.
+	ErrPlanNotPending = errors.New("plan is not pending; compute a new plan")
 	// ErrLeaseLost means the caller's claim on an attempt is no longer
 	// current: its lease expired and another worker reclaimed the attempt,
 	// or the attempt already finished. The caller's result is not recorded.
@@ -51,11 +54,15 @@ type Store interface {
 	// presumed abandoned (its worker crashed or stalled) and is reclaimed:
 	// (attempt, true). Lease age is measured on the store's clock, never the
 	// caller's. A claimed attempt carries a new Token; any earlier holder's
-	// token stops working. Returns ErrPlanBusy if another key holds an
-	// in_progress attempt on the plan.
+	// token stops working. A new key is claimed only while the plan is
+	// pending, checked under the plan's row lock in the same transaction:
+	// otherwise ErrPlanNotPending (ErrNotFound if there is no such plan).
+	// Returns ErrPlanBusy if another key holds an in_progress attempt on the
+	// plan.
 	BeginApply(ctx context.Context, a domain.ApplyAttempt, lease time.Duration) (domain.ApplyAttempt, bool, error)
 	// FinishApply records the outcome on the attempt and the plan, and writes
-	// an audit entry and a plan.applied event, atomically. It is fenced: it
+	// an audit entry and a plan.applied event, atomically. It moves the plan
+	// only out of pending, never from one terminal status to another. It is fenced: it
 	// writes only if a (key, Token) is still the current in_progress claim,
 	// and otherwise returns ErrLeaseLost and changes nothing. a.Actor is the
 	// audit actor. Being fenced, it is safe to retry.

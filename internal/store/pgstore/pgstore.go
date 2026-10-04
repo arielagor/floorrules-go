@@ -223,25 +223,44 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 	var out domain.ApplyAttempt
 	var created bool
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var err error
-		out, err = scanAttempt(tx.QueryRow(ctx, `INSERT INTO apply_attempts
-			(idempotency_key, plan_id, request_hash, status, actor, attempt_token)
-			VALUES ($1, $2, $3, 'in_progress', $4, gen_random_uuid())
-			ON CONFLICT (idempotency_key) DO NOTHING
-			RETURNING `+attemptColumns, a.IdempotencyKey, a.PlanID, a.RequestHash, a.Actor))
-		if err == nil {
-			created = true
-			return nil
+		// Every claim on a plan serialises on the plan's row lock, so the
+		// pending check and the insert below are one step. Checked outside
+		// this transaction, a second key could pass the check, wait while
+		// the first key finished, and then claim an applied plan.
+		var planStatus string
+		err := tx.QueryRow(ctx, `SELECT status FROM plans WHERE id = $1 FOR UPDATE`, a.PlanID).Scan(&planStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return store.ErrNotFound
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		// The key exists. Lock it and decide between replay and lease reclaim.
-		out, err = scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+`
-			FROM apply_attempts WHERE idempotency_key = $1 FOR UPDATE`, a.IdempotencyKey))
 		if err != nil {
 			return err
 		}
+
+		selectKey := `SELECT ` + attemptColumns + ` FROM apply_attempts WHERE idempotency_key = $1 FOR UPDATE`
+		out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.IdempotencyKey))
+		if errors.Is(err, pgx.ErrNoRows) {
+			// A new key: claim it only while the plan is pending.
+			if domain.PlanStatus(planStatus) != domain.PlanPending {
+				return store.ErrPlanNotPending
+			}
+			out, err = scanAttempt(tx.QueryRow(ctx, `INSERT INTO apply_attempts
+				(idempotency_key, plan_id, request_hash, status, actor, attempt_token)
+				VALUES ($1, $2, $3, 'in_progress', $4, gen_random_uuid())
+				ON CONFLICT (idempotency_key) DO NOTHING
+				RETURNING `+attemptColumns, a.IdempotencyKey, a.PlanID, a.RequestHash, a.Actor))
+			if errors.Is(err, pgx.ErrNoRows) {
+				// A concurrent claim on another plan took the key first;
+				// answer from its record.
+				out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.IdempotencyKey))
+				return err
+			}
+			created = err == nil
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		// The key exists: replay, or reclaim an abandoned attempt.
 		if out.Status != domain.AttemptInProgress || out.RequestHash != a.RequestHash {
 			return nil
 		}
@@ -302,13 +321,23 @@ func (s *Store) FinishApply(ctx context.Context, publisherID string, a domain.Ap
 			return err
 		}
 		actor, key := a.Actor, a.IdempotencyKey
-		tag, err := tx.Exec(ctx, `UPDATE plans SET status = $3 WHERE id = $1 AND publisher_id = $2`,
+		// Only a pending plan moves; a terminal status is never overwritten.
+		// The attempt, audit row and event are still written: they record
+		// what this apply did on the platform.
+		tag, err := tx.Exec(ctx, `UPDATE plans SET status = $3 WHERE id = $1 AND publisher_id = $2 AND status = 'pending'`,
 			planID, publisherID, string(result.Status))
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return store.ErrNotFound
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM plans WHERE id = $1 AND publisher_id = $2)`,
+				planID, publisherID).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return store.ErrNotFound
+			}
 		}
 		if err := insertAudit(ctx, tx, actor, publisherID, "plan.apply", planID,
 			map[string]any{"status": result.Status, "idempotency_key": key}); err != nil {

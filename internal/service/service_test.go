@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -318,6 +319,65 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 	res, replayed, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "lease-key-01", false)
 	if err != nil || replayed || res.Status != domain.PlanApplied {
 		t.Fatalf("reclaim = %+v replayed=%v err=%v", res, replayed, err)
+	}
+}
+
+// interleavingStore runs `before` once, just before the BeginApply for key,
+// to place another request's whole apply inside this one's check-then-act
+// window.
+type interleavingStore struct {
+	*memstore.Store
+	key    string
+	before func()
+	once   sync.Once
+}
+
+func (s *interleavingStore) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease time.Duration) (domain.ApplyAttempt, bool, error) {
+	if a.IdempotencyKey == s.key {
+		s.once.Do(s.before)
+	}
+	return s.Store.BeginApply(ctx, a, lease)
+}
+
+// M2 (day-2 review): the double click with a fresh key. B checks the plan
+// is pending; A applies it in full; B then claims and runs it. B must be
+// refused at the claim, and A's "applied" must not be overwritten.
+func TestApply_SecondKeyAfterFirstFinishedIsRefused(t *testing.T) {
+	mem := memstore.New()
+	ist := &interleavingStore{Store: mem, key: "click-two-0001"}
+	ssp := adapter.NewMock()
+	retry := adapter.DefaultRetryPolicy()
+	retry.Sleep = func(context.Context, time.Duration) error { return nil }
+	svc := mustNew(t, ist, ssp, Config{Retry: retry})
+	h := harness{svc: svc, st: mem, ssp: ssp}
+	ctx := context.Background()
+	h.rule(t, "ctv", "US", 2_000_000)
+	p := h.plan(t)
+
+	ist.before = func() {
+		if res, _, err := svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "click-one-0001", false); err != nil || res.Status != domain.PlanApplied {
+			t.Errorf("first click: %+v %v", res, err)
+		}
+	}
+	res, _, err := svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "click-two-0001", false)
+	if !errors.Is(err, ErrPlanNotPending) {
+		t.Errorf("second click: want ErrPlanNotPending, got %v (result %s)", err, res.Status)
+	}
+	if ssp.Calls("SetFloor") != 1 {
+		t.Errorf("SetFloor calls = %d, want 1 (the second click must not touch the platform)", ssp.Calls("SetFloor"))
+	}
+	if got, _ := svc.GetPlan(ctx, pub, p.ID); got.Status != domain.PlanApplied {
+		t.Errorf("plan status = %s, want applied: the second click overwrote it", got.Status)
+	}
+	applies := 0
+	entries, _ := mem.ListAudit(ctx, pub, 50)
+	for _, e := range entries {
+		if e.Action == "plan.apply" {
+			applies++
+		}
+	}
+	if applies != 1 {
+		t.Errorf("plan.apply audit rows = %d, want 1", applies)
 	}
 }
 

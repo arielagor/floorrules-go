@@ -27,6 +27,7 @@ func Run(t *testing.T, newStore Factory) {
 	t.Run("ApplyIdempotency", func(t *testing.T) { testApplyIdempotency(t, newStore(t)) })
 	t.Run("ApplyLeaseReclaim", func(t *testing.T) { testLeaseReclaim(t, newStore(t)) })
 	t.Run("ConcurrentBeginApply", func(t *testing.T) { testConcurrentBegin(t, newStore(t)) })
+	t.Run("ClaimRequiresPendingPlan", func(t *testing.T) { testClaimRequiresPending(t, newStore(t)) })
 	t.Run("AuditAndOutboxAtomicWithChange", func(t *testing.T) { testAuditOutbox(t, newStore(t)) })
 	t.Run("EventDedupe", func(t *testing.T) { testEventDedupe(t, newStore(t)) })
 	t.Run("OutboxRedelivery", func(t *testing.T) { testOutboxRedelivery(t, newStore(t)) })
@@ -269,6 +270,39 @@ func testConcurrentBegin(t *testing.T, s store.Store) {
 	wg.Wait()
 	if createdCount != 1 {
 		t.Fatalf("%d attempts created concurrently for one plan, want exactly 1 (busy=%d)", createdCount, busy)
+	}
+}
+
+// testClaimRequiresPendingPlan (day-2 review M2): the pending check belongs to
+// the claim's transaction. Key A applies the plan; a fresh key B must then be
+// refused, and the plan stays applied.
+func testClaimRequiresPending(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	p := newPlan("pub-a")
+	if err := s.CreatePlan(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	a, _, err := s.BeginApply(ctx, attempt("key-a", p.ID), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishApply(ctx, "pub-a", a, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+		t.Fatal(err)
+	}
+	b := attempt("key-b", p.ID)
+	b.RequestHash = "h-b"
+	if _, created, err := s.BeginApply(ctx, b, time.Hour); created || !errors.Is(err, store.ErrPlanNotPending) {
+		t.Fatalf("fresh key on an applied plan: created=%v err=%v; want ErrPlanNotPending", created, err)
+	}
+	if _, _, err := s.BeginApply(ctx, attempt("key-c", id.New()), time.Hour); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("claim on a missing plan: want ErrNotFound, got %v", err)
+	}
+	if got, _ := s.GetPlan(ctx, "pub-a", p.ID); got.Status != domain.PlanApplied {
+		t.Fatalf("plan status = %s, want applied", got.Status)
+	}
+	// The finished key still replays.
+	if done, created, err := s.BeginApply(ctx, attempt("key-a", p.ID), time.Hour); err != nil || created || done.Result == nil {
+		t.Fatalf("replay of the finished key = %+v, %v, %v", done, created, err)
 	}
 }
 

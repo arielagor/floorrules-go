@@ -1,0 +1,22 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+sbom*.json
+
+# local secrets and env files never enter the repo
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# terraform local state
+infra/terraform/.terraform/
+infra/terraform/.terraform.lock.hcl
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/*.tfvars

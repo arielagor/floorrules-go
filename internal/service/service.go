@@ -323,6 +323,14 @@ func (s *Service) HandleRuleChanged(ctx context.Context, m events.Message) error
 	if err != nil {
 		return err
 	}
+	if len(plan.Ops) == 0 {
+		// Platform already matches (e.g. the change was applied before this
+		// event arrived). Nothing to review, so propose nothing. No dedupe row
+		// is needed: this path has no side effects, so redelivery is harmless.
+		s.cfg.Metrics.Inc("auto_plans_skipped_total", "reason", "no_drift")
+		s.cfg.Log.Info("rule change needs no plan: platform already matches", "event_id", m.ID, "publisher_id", p.PublisherID)
+		return nil
+	}
 	created, err := s.store.CreatePlanForEvent(ctx, AutoPlannerConsumer, m.ID, plan)
 	if err != nil {
 		return err

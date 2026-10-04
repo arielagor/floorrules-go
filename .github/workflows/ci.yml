@@ -1,0 +1,127 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tool versions match what VERIFY.md records from the local run.
+  GOLANGCI_LINT_VERSION: v2.14.0
+  GOVULNCHECK_VERSION: v1.8.0
+  SYFT_VERSION: v1.54.0
+  KUBECONFORM_VERSION: v0.8.0
+
+# Third-party actions are referenced by major tag for readability in this
+# sample. A production repo pins every action to a full commit SHA.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet -tags integration ./...
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
+          golangci-lint run ./...
+      - name: unit tests (race, coverage)
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+          govulncheck ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: integration tests against Postgres 16
+        run: go test -race -count=1 -tags integration ./internal/store/...
+
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: kubeconform
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@${KUBECONFORM_VERSION}
+          kubeconform -strict -summary deploy/k8s/
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform validate (no backend, no plan, no apply)
+        working-directory: infra/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  image:
+    needs: [check, integration, manifests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing via GitHub OIDC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: docker build
+        run: docker build -t floorsvc:${{ github.sha }} .
+      - name: SBOM (syft, SPDX JSON)
+        run: |
+          go install github.com/anchore/syft/cmd/syft@${SYFT_VERSION}
+          syft floorsvc:${{ github.sha }} -o spdx-json=sbom.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+      # Placeholder: push to Artifact Registry and sign the pushed digest on
+      # release tags. Needs Workload Identity Federation for GCP auth, which
+      # this sample does not set up, so the steps are inert until configured.
+      - name: install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sigstore/cosign-installer@v3
+      - name: push and sign (placeholder)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "TODO: authenticate to GCP via WIF, push to \$REGION-docker.pkg.dev/\$PROJECT/floorrules/floorsvc"
+          echo "TODO: cosign sign --yes \$IMAGE@\$DIGEST && cosign attest --yes --type spdxjson --predicate sbom.spdx.json \$IMAGE@\$DIGEST"

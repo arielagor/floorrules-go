@@ -337,6 +337,27 @@ func TestRuleChanged_OutboxToConsumerWithDedupe(t *testing.T) {
 	}
 }
 
+// Found by the container smoke run: an event that arrives after its rule was
+// already applied used to produce an empty "proposed" plan. No drift means
+// nothing to review, so no plan.
+func TestRuleChanged_NoDriftProposesNothing(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.rule(t, "ctv", "US", 2_000_000)
+	h.ssp.Seed(pub, domain.PlatformFloor{Segment: seg("ctv", "US"), FloorMicros: 2_000_000, ManagedBy: domain.ManagedBy})
+
+	msg := events.Message{ID: "evt-no-drift", Topic: domain.TopicRuleChanged, Payload: []byte(`{"publisher_id":"acme-tv"}`)}
+	if err := h.svc.HandleRuleChanged(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.m.Get("auto_plans_total"); got != 0 {
+		t.Fatalf("auto_plans_total = %v, want 0 for a no-drift event", got)
+	}
+	if got := h.m.Get("auto_plans_skipped_total", "reason", "no_drift"); got != 1 {
+		t.Fatalf("auto_plans_skipped_total = %v, want 1", got)
+	}
+}
+
 func waitFor(t *testing.T, ch <-chan string) string {
 	t.Helper()
 	select {

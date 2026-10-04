@@ -128,7 +128,9 @@ func (s *Store) CreatePlan(_ context.Context, p domain.Plan) error {
 }
 
 func (s *Store) createPlanLocked(p domain.Plan) {
-	p.CreatedAt = s.now().UTC()
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = s.now().UTC()
+	}
 	if p.Ops == nil {
 		p.Ops = []domain.Op{}
 	}
@@ -145,6 +147,17 @@ func (s *Store) GetPlan(_ context.Context, publisherID, planID string) (domain.P
 		return domain.Plan{}, store.ErrNotFound
 	}
 	return p, nil
+}
+
+// GetAttempt implements store.Store.
+func (s *Store) GetAttempt(_ context.Context, key string) (domain.ApplyAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.attempts[key]
+	if !ok {
+		return domain.ApplyAttempt{}, store.ErrNotFound
+	}
+	return a, nil
 }
 
 // BeginApply implements store.Store.

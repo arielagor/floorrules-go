@@ -147,8 +147,13 @@ func insertPlan(ctx context.Context, tx pgx.Tx, p domain.Plan) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO plans (id, publisher_id, ops, base_fingerprint, status, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6)`, p.ID, p.PublisherID, ops, p.BaseFingerprint, string(p.Status), p.CreatedBy); err != nil {
+	var createdAt *time.Time
+	if !p.CreatedAt.IsZero() {
+		createdAt = &p.CreatedAt
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO plans (id, publisher_id, ops, base_fingerprint, status, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()))`,
+		p.ID, p.PublisherID, ops, p.BaseFingerprint, string(p.Status), p.CreatedBy, createdAt); err != nil {
 		return err
 	}
 	return insertAudit(ctx, tx, p.CreatedBy, p.PublisherID, "plan.create", p.ID, map[string]any{"ops": len(p.Ops)})
@@ -198,6 +203,16 @@ func scanAttempt(row pgx.Row) (domain.ApplyAttempt, error) {
 		}
 	}
 	return a, nil
+}
+
+// GetAttempt implements store.Store.
+func (s *Store) GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error) {
+	a, err := scanAttempt(s.pool.QueryRow(ctx, `SELECT `+attemptColumns+`
+		FROM apply_attempts WHERE idempotency_key = $1`, key))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ApplyAttempt{}, store.ErrNotFound
+	}
+	return a, err
 }
 
 // BeginApply implements store.Store.

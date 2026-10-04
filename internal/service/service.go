@@ -1,0 +1,337 @@
+// Package service orchestrates rules, planning and safe apply. It owns the
+// business rules; the HTTP layer only translates requests and errors.
+package service
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/arielagor/floorrules/internal/adapter"
+	"github.com/arielagor/floorrules/internal/domain"
+	"github.com/arielagor/floorrules/internal/events"
+	"github.com/arielagor/floorrules/internal/id"
+	"github.com/arielagor/floorrules/internal/metrics"
+	"github.com/arielagor/floorrules/internal/store"
+)
+
+// Errors the API maps to HTTP statuses.
+var (
+	ErrNotFound              = store.ErrNotFound
+	ErrConflict              = store.ErrConflict
+	ErrPlanNotPending        = errors.New("plan is not pending; compute a new plan")
+	ErrRiskyNotAcknowledged  = errors.New("plan contains risky ops; resend with acknowledge_risky=true after review")
+	ErrApplyInProgress       = errors.New("an apply for this plan or key is already in progress")
+	ErrIdempotencyKeyReused  = errors.New("idempotency key was already used for a different request")
+	ErrInvalidIdempotencyKey = errors.New("Idempotency-Key header must be 8-128 chars of [A-Za-z0-9._:-]")
+	ErrPlatformUnavailable   = errors.New("ad platform unavailable")
+)
+
+// AutoPlannerConsumer names the rule.changed consumer for dedupe records.
+const AutoPlannerConsumer = "auto-planner"
+
+// Config tunes the service.
+type Config struct {
+	Limits       domain.PlanLimits
+	Retry        adapter.RetryPolicy
+	ApplyLease   time.Duration // after this, an in_progress attempt is presumed abandoned
+	ApplyTimeout time.Duration // overall budget for executing one plan
+	Now          func() time.Time
+	Log          *slog.Logger
+	Metrics      *metrics.Registry
+}
+
+// Service is safe for concurrent use.
+type Service struct {
+	store store.Store
+	ssp   adapter.SSP
+	cfg   Config
+}
+
+// New builds a Service, filling unset config with defaults.
+func New(st store.Store, ssp adapter.SSP, cfg Config) *Service {
+	if cfg.Limits.MaxOps == 0 {
+		cfg.Limits = domain.DefaultLimits
+	}
+	if cfg.Retry.MaxAttempts == 0 {
+		cfg.Retry = adapter.DefaultRetryPolicy()
+	}
+	if cfg.ApplyLease == 0 {
+		cfg.ApplyLease = 5 * time.Minute
+	}
+	if cfg.ApplyTimeout == 0 {
+		cfg.ApplyTimeout = 2 * time.Minute
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
+	}
+	return &Service{store: st, ssp: ssp, cfg: cfg}
+}
+
+// Ready reports whether dependencies are reachable.
+func (s *Service) Ready(ctx context.Context) error { return s.store.Ping(ctx) }
+
+// CreateRule validates and stores a rule.
+func (s *Service) CreateRule(ctx context.Context, actor string, r domain.Rule) (domain.Rule, error) {
+	if err := domain.NormalizeAndValidate(&r); err != nil {
+		return domain.Rule{}, err
+	}
+	r.ID = id.New()
+	r.CreatedBy = actor
+	return s.store.CreateRule(ctx, r)
+}
+
+// DisableRule soft-deletes a rule.
+func (s *Service) DisableRule(ctx context.Context, actor, publisherID, ruleID string) (domain.Rule, error) {
+	return s.store.DisableRule(ctx, publisherID, ruleID, actor)
+}
+
+// ListRules returns every rule (active and disabled) for a publisher.
+func (s *Service) ListRules(ctx context.Context, publisherID string) ([]domain.Rule, error) {
+	return s.store.ListRules(ctx, publisherID)
+}
+
+// ListAudit returns the newest audit entries for a publisher.
+func (s *Service) ListAudit(ctx context.Context, publisherID string, limit int) ([]domain.AuditEntry, error) {
+	return s.store.ListAudit(ctx, publisherID, limit)
+}
+
+// GetPlan returns one plan.
+func (s *Service) GetPlan(ctx context.Context, publisherID, planID string) (domain.Plan, error) {
+	return s.store.GetPlan(ctx, publisherID, planID)
+}
+
+func (s *Service) listFloors(ctx context.Context, publisherID string) ([]domain.PlatformFloor, error) {
+	var floors []domain.PlatformFloor
+	attempts, err := s.cfg.Retry.Do(ctx, func(ctx context.Context) error {
+		var err error
+		floors, err = s.ssp.ListFloors(ctx, publisherID)
+		return err
+	})
+	s.recordAdapterCall("list", attempts, err)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrPlatformUnavailable, err)
+	}
+	return floors, nil
+}
+
+// buildPlan reads current state and diffs it. It does not persist.
+func (s *Service) buildPlan(ctx context.Context, actor, publisherID string) (domain.Plan, error) {
+	rules, err := s.store.ListRules(ctx, publisherID)
+	if err != nil {
+		return domain.Plan{}, err
+	}
+	floors, err := s.listFloors(ctx, publisherID)
+	if err != nil {
+		return domain.Plan{}, err
+	}
+	ops, err := domain.ComputeOps(rules, floors, s.cfg.Limits)
+	if err != nil {
+		return domain.Plan{}, err
+	}
+	return domain.Plan{
+		ID: id.New(), PublisherID: publisherID, Ops: ops, BaseFingerprint: domain.Fingerprint(floors),
+		Status: domain.PlanPending, CreatedBy: actor, CreatedAt: s.cfg.Now().UTC(),
+	}, nil
+}
+
+// CreatePlan computes and stores a plan for review. Nothing changes on the
+// platform until the plan is applied.
+func (s *Service) CreatePlan(ctx context.Context, actor, publisherID string) (domain.Plan, error) {
+	p, err := s.buildPlan(ctx, actor, publisherID)
+	if err != nil {
+		return domain.Plan{}, err
+	}
+	if err := s.store.CreatePlan(ctx, p); err != nil {
+		return domain.Plan{}, err
+	}
+	return p, nil
+}
+
+var idemKeyRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
+
+func requestHash(planID string, ackRisky bool) string {
+	sum := sha256.Sum256([]byte(planID + "|" + strconv.FormatBool(ackRisky)))
+	return hex.EncodeToString(sum[:])
+}
+
+// ApplyPlan executes a plan exactly once per idempotency key. A repeat of a
+// finished request returns the stored result with replayed=true and makes no
+// platform calls.
+func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key string, ackRisky bool) (domain.ApplyResult, bool, error) {
+	if !idemKeyRe.MatchString(key) {
+		return domain.ApplyResult{}, false, ErrInvalidIdempotencyKey
+	}
+	hash := requestHash(planID, ackRisky)
+	leaseCutoff := s.cfg.Now().Add(-s.cfg.ApplyLease)
+
+	// 1. A key we have seen is answered from the record, before any state
+	// checks, unless it is an abandoned attempt that BeginApply may reclaim.
+	if prior, err := s.store.GetAttempt(ctx, key); err == nil {
+		abandoned := prior.Status == domain.AttemptInProgress && prior.RequestHash == hash &&
+			prior.StartedAt.Before(leaseCutoff)
+		if !abandoned {
+			return s.replay(prior, hash)
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return domain.ApplyResult{}, false, err
+	}
+
+	// 2. Preconditions. Failing these does not consume the key.
+	plan, err := s.store.GetPlan(ctx, publisherID, planID)
+	if err != nil {
+		return domain.ApplyResult{}, false, err
+	}
+	if plan.Status != domain.PlanPending {
+		return domain.ApplyResult{}, false, ErrPlanNotPending
+	}
+	if plan.HasRisky() && !ackRisky {
+		return domain.ApplyResult{}, false, ErrRiskyNotAcknowledged
+	}
+
+	// 3. Claim the key. Losing a race to the same key falls back to replay.
+	attempt, created, err := s.store.BeginApply(ctx, domain.ApplyAttempt{
+		IdempotencyKey: key, PlanID: planID, RequestHash: hash, Actor: actor,
+	}, leaseCutoff)
+	if errors.Is(err, store.ErrPlanBusy) {
+		return domain.ApplyResult{}, false, ErrApplyInProgress
+	}
+	if err != nil {
+		return domain.ApplyResult{}, false, err
+	}
+	if !created {
+		return s.replay(attempt, hash)
+	}
+
+	// 4. Execute, detached from the caller: a client disconnect must not
+	// abandon a plan halfway. The apply has its own deadline instead.
+	execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ApplyTimeout)
+	defer cancel()
+	result := s.execute(execCtx, plan)
+
+	if err := s.store.FinishApply(execCtx, publisherID, key, actor, result); err != nil {
+		// The platform changes happened but the record did not commit. The
+		// attempt stays in_progress until its lease expires; a retry with the
+		// same key then re-runs, which the drift check turns into "stale".
+		s.cfg.Log.Error("apply finished but not recorded", "plan_id", planID, "key", key, "err", err)
+		return domain.ApplyResult{}, false, err
+	}
+	s.cfg.Metrics.Inc("apply_total", "status", string(result.Status))
+	s.cfg.Log.Info("plan applied", "plan_id", planID, "publisher_id", publisherID, "status", result.Status, "actor", actor)
+	return result, false, nil
+}
+
+func (s *Service) replay(a domain.ApplyAttempt, hash string) (domain.ApplyResult, bool, error) {
+	if a.RequestHash != hash {
+		return domain.ApplyResult{}, false, ErrIdempotencyKeyReused
+	}
+	if a.Status == domain.AttemptInProgress || a.Result == nil {
+		return domain.ApplyResult{}, false, ErrApplyInProgress
+	}
+	return *a.Result, true, nil
+}
+
+// execute performs a plan's ops in order, stopping at the first permanent
+// failure. It never returns an error: every outcome is a result to record.
+func (s *Service) execute(ctx context.Context, plan domain.Plan) domain.ApplyResult {
+	res := domain.ApplyResult{PlanID: plan.ID, Results: make([]domain.OpResult, 0, len(plan.Ops))}
+
+	floors, err := s.listFloors(ctx, plan.PublisherID)
+	if err != nil {
+		res.Status, res.Reason = domain.PlanFailed, "could not read platform state: "+err.Error()
+		return res
+	}
+	if domain.Fingerprint(floors) != plan.BaseFingerprint {
+		res.Status, res.Reason = domain.PlanStale, "platform state changed since the plan was computed; compute a new plan"
+		return res
+	}
+
+	applied, failed := 0, false
+	for _, op := range plan.Ops {
+		if failed {
+			res.Results = append(res.Results, domain.OpResult{Op: op, Outcome: domain.OutcomeSkipped})
+			continue
+		}
+		attempts, err := s.cfg.Retry.Do(ctx, func(ctx context.Context) error { return s.applyOp(ctx, plan.PublisherID, op) })
+		s.recordAdapterCall(string(op.Kind), attempts, err)
+		r := domain.OpResult{Op: op, Attempts: attempts, Outcome: domain.OutcomeApplied}
+		if err != nil {
+			r.Outcome, r.Error, failed = domain.OutcomeFailed, err.Error(), true
+		} else {
+			applied++
+		}
+		res.Results = append(res.Results, r)
+	}
+
+	switch {
+	case !failed:
+		res.Status = domain.PlanApplied
+	case applied > 0:
+		res.Status, res.Reason = domain.PlanPartiallyApplied, "an op failed after earlier ops were applied; compute a new plan to converge"
+	default:
+		res.Status, res.Reason = domain.PlanFailed, "the first op failed; nothing was changed"
+	}
+	return res
+}
+
+func (s *Service) applyOp(ctx context.Context, publisherID string, op domain.Op) error {
+	switch op.Kind {
+	case domain.OpCreate, domain.OpUpdate:
+		return s.ssp.SetFloor(ctx, publisherID, domain.PlatformFloor{
+			Segment: op.Segment, FloorMicros: op.ToMicros, ManagedBy: domain.ManagedBy,
+		})
+	case domain.OpDelete:
+		return s.ssp.DeleteFloor(ctx, publisherID, op.Segment)
+	default:
+		return fmt.Errorf("unknown op kind %q", op.Kind)
+	}
+}
+
+func (s *Service) recordAdapterCall(op string, attempts int, err error) {
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	s.cfg.Metrics.Inc("ssp_calls_total", "op", op, "outcome", outcome)
+	if attempts > 1 {
+		s.cfg.Metrics.Add("ssp_retries_total", float64(attempts-1), "op", op)
+	}
+}
+
+// HandleRuleChanged is the rule.changed consumer: it proposes a plan for the
+// publisher so an operator can review and apply it. Duplicate deliveries of
+// the same event are absorbed by the store's processed-events record.
+func (s *Service) HandleRuleChanged(ctx context.Context, m events.Message) error {
+	var p domain.RuleChangedPayload
+	if err := json.Unmarshal(m.Payload, &p); err != nil || !domain.ValidPublisherID(p.PublisherID) {
+		// A malformed event will never succeed; log it and ack rather than
+		// redelivering it forever.
+		s.cfg.Log.Error("dropping malformed rule.changed event", "event_id", m.ID, "err", err)
+		return nil
+	}
+	plan, err := s.buildPlan(ctx, "system:"+AutoPlannerConsumer, p.PublisherID)
+	if err != nil {
+		return err
+	}
+	created, err := s.store.CreatePlanForEvent(ctx, AutoPlannerConsumer, m.ID, plan)
+	if err != nil {
+		return err
+	}
+	if created {
+		s.cfg.Metrics.Inc("auto_plans_total")
+		s.cfg.Log.Info("proposed plan from rule change", "event_id", m.ID, "plan_id", plan.ID, "ops", len(plan.Ops))
+	} else {
+		s.cfg.Metrics.Inc("events_deduplicated_total", "consumer", AutoPlannerConsumer)
+	}
+	return nil
+}

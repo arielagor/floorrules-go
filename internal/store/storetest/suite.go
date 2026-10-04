@@ -124,6 +124,9 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	}
 	past := time.Now().Add(-time.Hour)
 
+	if _, err := s.GetAttempt(ctx, "key-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetAttempt before begin: want ErrNotFound, got %v", err)
+	}
 	a, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), past)
 	if err != nil || !created || a.Status != domain.AttemptInProgress {
 		t.Fatalf("first BeginApply = %+v, %v, %v", a, created, err)
@@ -145,6 +148,10 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	done, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), past)
 	if err != nil || created || done.Status != domain.AttemptSucceeded || done.Result == nil {
 		t.Fatalf("replay after finish = %+v, %v, %v", done, created, err)
+	}
+	fetched, err := s.GetAttempt(ctx, "key-1")
+	if err != nil || fetched.Status != domain.AttemptSucceeded || fetched.FinishedAt == nil {
+		t.Fatalf("GetAttempt after finish = %+v, %v", fetched, err)
 	}
 	want, _ := json.Marshal(result)
 	got, _ := json.Marshal(done.Result)

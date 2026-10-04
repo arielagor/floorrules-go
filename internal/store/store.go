@@ -38,6 +38,8 @@ type Store interface {
 	CreatePlan(ctx context.Context, p domain.Plan) error
 	GetPlan(ctx context.Context, publisherID, planID string) (domain.Plan, error)
 
+	// GetAttempt returns the attempt stored under an idempotency key, or ErrNotFound.
+	GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error)
 	// BeginApply claims an idempotency key. If the key is new it inserts a
 	// in_progress attempt and returns (attempt, true). If the key exists it
 	// returns the stored attempt and false, except that an in_progress

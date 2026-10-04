@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +113,7 @@ func TestVerify_Rejects(t *testing.T) {
 	v := verifier(t, now)
 	for name, tok := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := v.Verify(context.Background(), tok); err != ErrUnauthenticated {
+			if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrUnauthenticated) {
 				t.Fatalf("want ErrUnauthenticated, got %v", err)
 			}
 		})

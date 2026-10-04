@@ -25,6 +25,7 @@ const (
 // RuleStatus is the lifecycle state of a rule.
 type RuleStatus string
 
+// Rule statuses.
 const (
 	RuleActive   RuleStatus = "active"
 	RuleDisabled RuleStatus = "disabled"
@@ -76,6 +77,7 @@ func (e *ValidationError) Error() string {
 // ErrValidation lets callers use errors.Is without caring about the details.
 var ErrValidation = errors.New("validation failed")
 
+// Is makes errors.Is(err, ErrValidation) true for any *ValidationError.
 func (e *ValidationError) Is(target error) bool { return target == ErrValidation }
 
 var (

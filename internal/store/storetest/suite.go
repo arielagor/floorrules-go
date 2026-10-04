@@ -43,7 +43,7 @@ func newPlan(pub string) domain.Plan {
 	return domain.Plan{
 		ID: id.New(), PublisherID: pub, Status: domain.PlanPending, CreatedBy: "user:test",
 		BaseFingerprint: "fp",
-		Ops: []domain.Op{{Kind: domain.OpCreate, Segment: domain.Segment{Device: "ctv", Geo: "US", Genre: "*", DemandPartner: "*"}, ToMicros: 1_000_000}},
+		Ops:             []domain.Op{{Kind: domain.OpCreate, Segment: domain.Segment{Device: "ctv", Geo: "US", Genre: "*", DemandPartner: "*"}, ToMicros: 1_000_000}},
 	}
 }
 

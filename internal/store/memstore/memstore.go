@@ -27,7 +27,7 @@ type Store struct {
 	now       func() time.Time
 	rules     map[string]domain.Rule
 	ruleSeq   map[string]int
-	plans    map[string]domain.Plan
+	plans     map[string]domain.Plan
 	attempts  map[string]domain.ApplyAttempt
 	audit     []domain.AuditEntry
 	outbox    []*outboxRow

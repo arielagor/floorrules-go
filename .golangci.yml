@@ -1,0 +1,41 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - integration
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - gosec        # security: weak crypto, file perms, SQL string building, etc.
+    - errorlint    # errors.Is/As instead of == on wrapped errors
+    - bodyclose    # HTTP response bodies are closed
+    - noctx        # outbound HTTP requests carry a context
+    - misspell
+    - revive
+    - unconvert
+    - copyloopvar
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-return
+        - name: error-naming
+        - name: unexported-return
+  exclusions:
+    rules:
+      # Test helpers build requests to a local httptest server.
+      - path: _test\.go
+        linters: [noctx, gosec]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/arielagor/floorrules

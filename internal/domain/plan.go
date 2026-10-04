@@ -24,6 +24,7 @@ type PlatformFloor struct {
 // OpKind is the change an operation makes on the platform.
 type OpKind string
 
+// Op kinds.
 const (
 	OpCreate OpKind = "create"
 	OpUpdate OpKind = "update"
@@ -44,6 +45,7 @@ type Op struct {
 // PlanStatus is the lifecycle state of a plan.
 type PlanStatus string
 
+// Plan statuses.
 const (
 	PlanPending          PlanStatus = "pending"
 	PlanApplied          PlanStatus = "applied"

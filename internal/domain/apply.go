@@ -8,6 +8,7 @@ import (
 // OpOutcome records what happened to one op during apply.
 type OpOutcome string
 
+// Op outcomes.
 const (
 	OutcomeApplied OpOutcome = "applied"
 	OutcomeFailed  OpOutcome = "failed"
@@ -34,6 +35,7 @@ type ApplyResult struct {
 // AttemptStatus is the state of one idempotent apply attempt.
 type AttemptStatus string
 
+// Attempt statuses.
 const (
 	AttemptInProgress AttemptStatus = "in_progress"
 	AttemptSucceeded  AttemptStatus = "succeeded"

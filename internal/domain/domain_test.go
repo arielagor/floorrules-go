@@ -95,7 +95,7 @@ func TestComputeOps_CreateUpdateDeleteAndUnmanaged(t *testing.T) {
 		{Segment: seg("ctv", "US"), FloorMicros: 4_000_000, ManagedBy: ManagedBy},
 		{Segment: seg("desktop", "GB"), FloorMicros: 2_000_000, ManagedBy: ManagedBy},
 		{Segment: seg("tablet", "US"), FloorMicros: 1_000_000, ManagedBy: ManagedBy}, // disabled rule -> delete
-		{Segment: seg("ctv", "CA"), FloorMicros: 3_000_000, ManagedBy: "human"},       // not ours -> keep
+		{Segment: seg("ctv", "CA"), FloorMicros: 3_000_000, ManagedBy: "human"},      // not ours -> keep
 	}
 	ops, err := ComputeOps(rules, platform, DefaultLimits)
 	if err != nil {

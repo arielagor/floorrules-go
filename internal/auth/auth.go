@@ -102,6 +102,7 @@ type Claims struct {
 // Audience accepts the JWT "aud" claim as a string or an array of strings.
 type Audience []string
 
+// UnmarshalJSON implements json.Unmarshaler.
 func (a *Audience) UnmarshalJSON(b []byte) error {
 	var one string
 	if err := json.Unmarshal(b, &one); err == nil {

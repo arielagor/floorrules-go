@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: floorsvc
+  namespace: floorrules
+  labels:
+    app.kubernetes.io/name: floorsvc
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: floorsvc
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: floorsvc
+  namespace: floorrules
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: floorsvc

@@ -1,0 +1,59 @@
+# Default deny for every pod in the namespace, both directions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: floorrules
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Then allow only what floorsvc needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: floorsvc-allow
+  namespace: floorrules
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: floorsvc
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # From the API gateway namespace only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Cloud SQL private IP range (placeholder CIDR from infra/terraform).
+    - to:
+        - ipBlock:
+            cidr: 10.20.0.0/16
+      ports:
+        - port: 5432
+          protocol: TCP
+    # GKE metadata server, needed for Workload Identity tokens.
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.252/32
+      ports:
+        - port: 988
+          protocol: TCP
+    # SSP / ad-server APIs over HTTPS. Narrow to egress-gateway IPs in a real cluster.
+    - ports:
+        - port: 443
+          protocol: TCP

@@ -1,0 +1,12 @@
+.git
+.github
+deploy
+infra
+scripts
+*.md
+.env
+.env.*
+coverage.out
+sbom*.json
+bin
+dist

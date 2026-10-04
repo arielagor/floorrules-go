@@ -53,6 +53,20 @@ func TestTerraformControlsAreReal(t *testing.T) {
 	}
 }
 
+// L4 (day-2 review): the builder was digest-pinned but the runtime base,
+// the image that actually ships, followed a moving tag.
+func TestDockerfilePinsEveryBaseImageByDigest(t *testing.T) {
+	froms := regexp.MustCompile(`(?m)^FROM\s+(\S+)`).FindAllStringSubmatch(readRepoFile(t, "Dockerfile"), -1)
+	if len(froms) == 0 {
+		t.Fatal("no FROM lines")
+	}
+	for _, f := range froms {
+		if !regexp.MustCompile(`@sha256:[0-9a-f]{64}$`).MatchString(f[1]) {
+			t.Errorf("FROM %s is not pinned by digest", f[1])
+		}
+	}
+}
+
 func TestPodsReadSecretsThroughSecretManagerCSI(t *testing.T) {
 	for _, f := range []string{"deploy/k8s/deployment.yaml", "deploy/k8s/migrate-job.yaml"} {
 		y := readRepoFile(t, f)

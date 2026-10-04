@@ -16,9 +16,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -buildid=" -o /o
 
 # ---- runtime ----
 # distroless/static: no shell, no package manager, CA certs + tzdata only.
-FROM gcr.io/distroless/static-debian12:nonroot
+# Pinned by digest like the builder: this is the image that ships. The tag
+# is kept for readers; the digest is what resolves (static-debian12:nonroot,
+# index digest from `docker pull` on 2026-10-04). Bump it deliberately.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/floorsvc /floorsvc
 # Numeric UID so Kubernetes can verify runAsNonRoot without resolving names.
 USER 65532:65532
-EXPOSE 8080
+# API on 8080, /metrics on 9090.
+EXPOSE 8080 9090
 ENTRYPOINT ["/floorsvc"]

@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
-# Pre-commit gate. Install with:  cp scripts/pre-commit .git/hooks/pre-commit
+# Pre-commit gate. Install with:  git config core.hooksPath scripts
+# (Not a copy into .git/hooks: a global core.hooksPath silently overrides
+# that, which is exactly how this hook first failed to run. See BUILD-LOG.md.)
 # Every step must pass; there is no "skip" flag on purpose.
+# Note: gofmt and the tests see the working tree, not only the staged diff.
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"

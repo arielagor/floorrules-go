@@ -1,0 +1,18 @@
+# Threat model (STRIDE-lite)
+
+**Asset:** floor prices on a publisher's ad platform. A wrong floor loses revenue silently (too high: unfilled impressions; too low: underpriced inventory). Secondary assets: the audit trail, the signing key, and the database credentials.
+
+**Trust boundaries:** client to API (JWT), API to Postgres (DSN secret), API to SSP (adapter), relay to broker.
+
+| | Threat | Mitigation in this sample | Gap / next step |
+|---|---|---|---|
+| **S**poofing | Forged or replayed token | HS256 verification. The algorithm is pinned, so `none` and HS512 are rejected. Constant-time compare, mandatory `exp`, `iss`/`aud`/`nbf` checks, 30s leeway, 4 KB token cap. The key is at least 32 bytes and comes from a file mount. | Shared-secret HMAC is a sample choice. Production should verify RS256/ES256 against the IdP's JWKS behind the same `Verifier` interface. |
+| **T**ampering | Operator or attacker sets a damaging floor | Validation bounds of $0.01 to $500 CPM and USD only. Plans must be reviewed. Changes over 50% or takeovers of unmanaged floors need `acknowledge_risky`. At most 200 ops per plan. It never deletes floors it didn't create. A drift fingerprint makes apply refuse a stale plan. | No two-person approval. A per-publisher limit on daily change volume would be the next guardrail. |
+| | Request body abuse | 64 KB body cap, unknown fields rejected, single JSON object only, Content-Type enforced, IDs format-checked before storage. | None at this scale. |
+| **R**epudiation | "I didn't apply that" | Every write appends an audit row (actor = token subject) in the same transaction as the change. The apply result is stored per idempotency key. | The audit table is append-only by convention, not enforced. Revoke UPDATE/DELETE from the app role, or export to a write-once sink. |
+| **I**nformation disclosure | Cross-tenant reads; leaking internals | The `pubs` claim is the tenant boundary: checked before any handler runs, and every query is publisher-scoped. 500s return only a request ID. Config errors never echo secret values. Secrets come only from env or `*_FILE`. Distroless image, no shell. | `/metrics` is unauthenticated on the API port, as is common for in-cluster scraping; it holds counts, not data. Better: a separate admin port admitted only from the monitoring namespace. Today's NetworkPolicy doesn't admit a scraper at all. |
+| **D**enial of service | Floods; slow clients; a bad SSP | Server timeouts (5s header, 15s read), 16 KB header cap, a 30s handler deadline, a 2m apply deadline. Retry backoff is capped and so is `Retry-After`. The queue is bounded. Resources are limited in k8s and the PDB keeps 1 pod up. | No rate limiting. Put it at the gateway (Cloud Armor or the API gateway) per token subject. |
+| | Concurrent applies | A partial unique index allows only one in-flight apply per plan, with lease reclaim for crashed pods. | None. |
+| **E**levation of privilege | Token with read scope writes; container escape | Per-route scopes (`rules:read`, `rules:write`, `plans:write`, `plans:apply`, `audit:read`), so applying is its own grant. Pods run non-root (UID 65532) on a read-only root FS with all capabilities dropped, no privilege escalation, RuntimeDefault seccomp, and restricted Pod Security Admission. Workload Identity is used, so no service-account keys exist. Default-deny NetworkPolicy. | Binary Authorization is declared in Terraform, but signing in CI is a placeholder until a registry and WIF exist. |
+
+**Supply chain:** one third-party Go module (pgx). govulncheck runs in pre-commit and CI; it caught GO-2026-5970 in a transitive `golang.org/x/text` during the build (see BUILD-LOG). The CI job generates an SPDX SBOM with syft. The builder image is pinned by digest.

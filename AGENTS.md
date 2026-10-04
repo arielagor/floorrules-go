@@ -23,6 +23,17 @@ Instructions for any coding agent (Claude Code, Codex, Cursor, etc.) working in 
 - Every exported identifier has a doc comment (revive enforces it).
 - Schema changes are new numbered files in `internal/store/pgstore/migrations`. Never edit an applied migration.
 
+## Patterns that passed every tool and were still wrong
+
+The day-2 review (BUILD-LOG.md) found these in code that was formatted, vetted, linted, scanned and green. Write code that avoids them, and write the test that would catch them.
+
+- **A deadline is not reusable after it is spent.** Work that must happen after a long step (recording a result, releasing a claim) gets its own budget from `context.WithoutCancel(ctx)` plus a fresh timeout, never the context the long step just exhausted. Test it with a fake that consumes the whole first budget.
+- **A lease needs a fence.** Anything reclaimable after a timeout carries a token that changes on every claim, and every write that finishes the work checks the token in the same statement. Without it, a worker that paused past its lease overwrites its successor. Test with two workers and a forced expiry, against Postgres.
+- **Check-then-act belongs in one transaction.** A status read followed by a write is a race unless the write is conditional (`UPDATE ... WHERE status = 'pending'`) or the row is locked (`SELECT ... FOR UPDATE`). Test the second actor arriving between the check and the act.
+- **Scope every lookup by tenant.** Not only list endpoints: idempotency keys, IDs from a path, anything a client can name. A key or ID that is unique only globally lets one tenant probe or replay another's. Key the table by `(publisher_id, ...)` and test the cross-tenant replay.
+- **At-least-once means the durable copy stays until the work is done.** Never mark an outbox row sent when it is handed to an in-memory buffer; mark it when the consumer (or the broker's ack) says it is done. Test a crash between hand-off and handling.
+- **Shutdown grace must cover the longest operation.** `terminationGracePeriodSeconds` covers drain plus the longest apply plus recording, and the process waits for in-flight work before it exits. `TestDeploymentGraceCoversLongestApply` pins the arithmetic; change both together.
+
 ## Definition of done
 
 A change is done only when all of these hold, and the evidence is in your summary:
@@ -34,7 +45,7 @@ A change is done only when all of these hold, and the evidence is in your summar
 5. If store code changed: `go test -race -tags integration ./internal/store/...` passes against Postgres.
 6. `govulncheck ./...` reports no vulnerabilities.
 7. A behaviour change has a test that failed before the change. Say which.
-8. If deploy files changed: `kubeconform -strict deploy/k8s/` and `terraform validate` pass.
+8. If deploy files changed: kubeconform passes exactly as CI runs it (`-strict`, with the CRDs-catalog schema location so PodMonitoring, Rules and SecretProviderClass are checked, not skipped), and `terraform validate` passes. If alert rules changed, `promtool check rules` passes on their groups and `TestAlertRulesUseExportedMetrics` passes.
 
 The pre-commit hook (`git config core.hooksPath scripts`) runs 1, 2, 3, a non-race 4, and 6. A missing tool fails the hook; nothing is skipped.
 

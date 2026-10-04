@@ -7,6 +7,8 @@
 // nil only after every subscribed handler has succeeded. Until then the
 // outbox row in the database is the copy of record, so a process that dies
 // mid-delivery leaves the row to be claimed again when its lease expires.
+// That durability is Postgres's: with STORE_BACKEND=memory the outbox, like
+// everything else, is lost when the process stops.
 package events
 
 import (

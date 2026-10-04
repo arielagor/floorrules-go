@@ -252,6 +252,31 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 			if domain.PlanStatus(planStatus) != domain.PlanPending {
 				return store.ErrPlanNotPending
 			}
+			// An in-progress attempt on this plan whose lease has expired
+			// lost its worker, and its client may have lost the key: it is
+			// superseded rather than left to block the plan forever. A live
+			// one makes the insert below fail on the one-in-flight index.
+			rows, err := tx.Query(ctx, `UPDATE apply_attempts SET status = 'abandoned', finished_at = now()
+				WHERE plan_id = $1 AND status = 'in_progress'
+				  AND started_at < now() - ($2::bigint * interval '1 millisecond')
+				RETURNING idempotency_key`, a.PlanID, lease.Milliseconds())
+			if err != nil {
+				return err
+			}
+			abandoned, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				return err
+			}
+			for _, k := range abandoned {
+				if err := insertAudit(ctx, tx, a.Actor, a.PublisherID, "plan.apply.abandoned", a.PlanID,
+					map[string]any{"idempotency_key": k, "superseded_by": a.IdempotencyKey}); err != nil {
+					return err
+				}
+				if err := insertOutbox(ctx, tx, domain.TopicPlanApplyAbandoned,
+					map[string]any{"publisher_id": a.PublisherID, "plan_id": a.PlanID, "idempotency_key": k}); err != nil {
+					return err
+				}
+			}
 			out, err = scanAttempt(tx.QueryRow(ctx, `INSERT INTO apply_attempts
 				(publisher_id, idempotency_key, plan_id, request_hash, status, actor, attempt_token)
 				VALUES ($1, $2, $3, $4, 'in_progress', $5, gen_random_uuid())
@@ -263,8 +288,12 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 				out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.PublisherID, a.IdempotencyKey))
 				return err
 			}
-			created = err == nil
-			return err
+			if err != nil {
+				return err
+			}
+			created, out.FollowsInterrupted = true, len(abandoned) > 0
+			return insertAudit(ctx, tx, a.Actor, a.PublisherID, "plan.apply.started", a.PlanID,
+				map[string]any{"idempotency_key": a.IdempotencyKey, "reclaimed": false})
 		}
 		if err != nil {
 			return err
@@ -287,7 +316,9 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 			return err
 		}
 		out, created = reclaimed, true
-		return nil
+		out.FollowsInterrupted = true
+		return insertAudit(ctx, tx, a.Actor, a.PublisherID, "plan.apply.started", a.PlanID,
+			map[string]any{"idempotency_key": a.IdempotencyKey, "reclaimed": true})
 	})
 	if constraintViolated(err, "apply_attempts_one_inflight_per_plan") {
 		return domain.ApplyAttempt{}, false, store.ErrPlanBusy

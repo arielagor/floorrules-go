@@ -197,13 +197,16 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 	if !ok || plan.PublisherID != a.PublisherID {
 		return domain.ApplyAttempt{}, false, store.ErrNotFound
 	}
+	expired := func(at time.Time) bool { return at.Before(now.Add(-lease)) }
 	if existing, ok := s.attempts[attemptKey(a.PublisherID, a.IdempotencyKey)]; ok {
-		if existing.Status == domain.AttemptInProgress && existing.RequestHash == a.RequestHash &&
-			existing.StartedAt.Before(now.Add(-lease)) {
+		if existing.Status == domain.AttemptInProgress && existing.RequestHash == a.RequestHash && expired(existing.StartedAt) {
 			existing.StartedAt = now
 			existing.Actor = a.Actor
 			existing.Token = id.New() // fences off the previous holder
 			s.attempts[attemptKey(a.PublisherID, a.IdempotencyKey)] = existing
+			s.auditLocked(a.Actor, a.PublisherID, "plan.apply.started", a.PlanID,
+				map[string]any{"idempotency_key": a.IdempotencyKey, "reclaimed": true})
+			existing.FollowsInterrupted = true
 			return existing, true, nil
 		}
 		existing.Token = "" // only the claimant gets a usable token
@@ -212,17 +215,35 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 	if plan.Status != domain.PlanPending {
 		return domain.ApplyAttempt{}, false, store.ErrPlanNotPending
 	}
-	for _, other := range s.attempts {
-		if other.PlanID == a.PlanID && other.Status == domain.AttemptInProgress {
+	follows := false
+	for k, other := range s.attempts {
+		if other.PlanID != a.PlanID || other.Status != domain.AttemptInProgress {
+			continue
+		}
+		if !expired(other.StartedAt) {
 			return domain.ApplyAttempt{}, false, store.ErrPlanBusy
 		}
+		// Its worker is presumed dead and its key lost: supersede it.
+		other.Status = domain.AttemptAbandoned
+		other.FinishedAt = &now
+		other.Token = ""
+		s.attempts[k] = other
+		s.auditLocked(a.Actor, a.PublisherID, "plan.apply.abandoned", a.PlanID,
+			map[string]any{"idempotency_key": other.IdempotencyKey, "superseded_by": a.IdempotencyKey})
+		s.emitLocked(domain.TopicPlanApplyAbandoned, map[string]any{
+			"publisher_id": a.PublisherID, "plan_id": a.PlanID, "idempotency_key": other.IdempotencyKey})
+		follows = true
 	}
 	a.Status = domain.AttemptInProgress
 	a.StartedAt = now
 	a.Result = nil
 	a.FinishedAt = nil
 	a.Token = id.New()
+	a.FollowsInterrupted = false
 	s.attempts[attemptKey(a.PublisherID, a.IdempotencyKey)] = a
+	s.auditLocked(a.Actor, a.PublisherID, "plan.apply.started", a.PlanID,
+		map[string]any{"idempotency_key": a.IdempotencyKey, "reclaimed": false})
+	a.FollowsInterrupted = follows
 	return a, true, nil
 }
 

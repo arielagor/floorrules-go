@@ -40,6 +40,10 @@ const (
 	AttemptInProgress AttemptStatus = "in_progress"
 	AttemptSucceeded  AttemptStatus = "succeeded"
 	AttemptFailed     AttemptStatus = "failed"
+	// AttemptAbandoned marks an in_progress attempt whose lease expired and
+	// which another key superseded: its worker died or stalled, possibly
+	// after writing to the platform. It is terminal and never replayed.
+	AttemptAbandoned AttemptStatus = "abandoned"
 )
 
 // ApplyAttempt is keyed by the client's Idempotency-Key.
@@ -56,6 +60,11 @@ type ApplyAttempt struct {
 	// Token fences the attempt: it changes on every claim (insert or lease
 	// reclaim), and only the holder of the current token may record a result.
 	Token string `json:"-"`
+	// FollowsInterrupted is set on a claim that took over from an earlier
+	// claim on the same plan whose lease expired (a reclaim of this key, or
+	// a new key superseding an abandoned one). The platform may already
+	// hold some of the plan's writes. Not stored.
+	FollowsInterrupted bool `json:"-"`
 }
 
 // AuditEntry is an append-only record of who changed what.
@@ -73,6 +82,9 @@ type AuditEntry struct {
 const (
 	TopicRuleChanged = "rule.changed"
 	TopicPlanApplied = "plan.applied"
+	// TopicPlanApplyAbandoned announces an attempt superseded after its
+	// lease expired, for whoever reconciles interrupted applies.
+	TopicPlanApplyAbandoned = "plan.apply_abandoned"
 )
 
 // Event is an outbox row and, once relayed, a queue message.

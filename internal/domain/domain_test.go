@@ -208,6 +208,31 @@ func TestFootprint_CoversOnlyThePlansSegments(t *testing.T) {
 	}
 }
 
+func TestSplitDrift_OwnWritesVersusForeignChanges(t *testing.T) {
+	ops := []Op{
+		{Kind: OpDelete, Segment: seg("ctv", "AU"), FromMicros: 7, FromManagedBy: ManagedBy},
+		{Kind: OpUpdate, Segment: seg("ctv", "CA"), FromMicros: 2, FromManagedBy: ManagedBy, ToMicros: 3},
+		{Kind: OpCreate, Segment: seg("ctv", "GB"), ToMicros: 5},
+	}
+	planned := []PlatformFloor{
+		{Segment: seg("ctv", "AU"), FloorMicros: 7, ManagedBy: ManagedBy},
+		{Segment: seg("ctv", "CA"), FloorMicros: 2, ManagedBy: ManagedBy},
+	}
+	if done, foreign := SplitDrift(ops, planned); done != 0 || foreign != 0 {
+		t.Fatalf("unchanged platform: done=%d foreign=%d", done, foreign)
+	}
+	// An interrupted attempt deleted AU and updated CA.
+	partial := []PlatformFloor{{Segment: seg("ctv", "CA"), FloorMicros: 3, ManagedBy: ManagedBy}}
+	if done, foreign := SplitDrift(ops, partial); done != 2 || foreign != 0 {
+		t.Fatalf("own partial writes: done=%d foreign=%d, want 2, 0", done, foreign)
+	}
+	// Someone else set GB by hand.
+	hand := append(partial, PlatformFloor{Segment: seg("ctv", "GB"), FloorMicros: 9, ManagedBy: "human"})
+	if done, foreign := SplitDrift(ops, hand); done != 2 || foreign != 1 {
+		t.Fatalf("hand-set GB: done=%d foreign=%d, want 2, 1", done, foreign)
+	}
+}
+
 func TestChangePct(t *testing.T) {
 	cases := []struct{ from, to, want int64 }{
 		{100, 150, 50}, {100, 151, 51}, {100, 40, 60}, {0, 10, 100}, {100, 100, 0},

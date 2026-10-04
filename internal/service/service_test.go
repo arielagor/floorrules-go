@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -357,6 +358,53 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 	res, replayed, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "lease-key-01", false)
 	if err != nil || replayed || res.Status != domain.PlanApplied {
 		t.Fatalf("reclaim = %+v replayed=%v err=%v", res, replayed, err)
+	}
+}
+
+// L3 and L7 (day-2 review): a worker claims the plan, writes one of its two
+// floors and dies. Before, a client that lost its key could never apply the
+// plan again (ErrApplyInProgress for every other key, forever), and a
+// reclaim reported the crashed worker's own write as someone else's drift.
+func TestApply_AfterAnInterruptedAttempt(t *testing.T) {
+	for _, tc := range []struct{ name, key string }{
+		{"same key reclaims", "crash-key-001"},
+		{"key lost, a new key supersedes", "fresh-key-001"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			ctx := context.Background()
+			h.rule(t, "ctv", "CA", 2_000_000)
+			h.rule(t, "ctv", "US", 2_000_000)
+			p := h.plan(t)
+			crashed := domain.ApplyAttempt{PublisherID: pub, IdempotencyKey: "crash-key-001", PlanID: p.ID,
+				RequestHash: requestHash(pub, p.ID, false), Actor: "user:ops"}
+			if _, _, err := h.st.BeginApply(ctx, crashed, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			// The crashed worker's first write landed; then it died.
+			if err := h.ssp.SetFloor(ctx, pub, domain.PlatformFloor{Segment: seg("ctv", "CA"), FloorMicros: 2_000_000, ManagedBy: domain.ManagedBy}); err != nil {
+				t.Fatal(err)
+			}
+			h.st.SetClock(func() time.Time { return time.Now().Add(10 * time.Minute) })
+
+			res, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, tc.key, false)
+			if err != nil || res.Status != domain.PlanStale {
+				t.Fatalf("apply = %+v, %v; want stale", res, err)
+			}
+			if !strings.Contains(res.Reason, "interrupted") {
+				t.Fatalf("reason = %q; want it to say an earlier attempt was interrupted, not that someone else changed the platform", res.Reason)
+			}
+			if tc.key != crashed.IdempotencyKey {
+				// The lost key, if it turns up again, is told what happened.
+				if _, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, crashed.IdempotencyKey, false); !errors.Is(err, ErrAttemptAbandoned) {
+					t.Fatalf("lost key replayed: want ErrAttemptAbandoned, got %v", err)
+				}
+			}
+			// A fresh plan holds only what the crashed worker did not do.
+			if p2 := h.plan(t); len(p2.Ops) != 1 || p2.Ops[0].Segment != seg("ctv", "US") {
+				t.Fatalf("follow-up plan = %+v, want the one remaining create", p2.Ops)
+			}
+		})
 	}
 }
 

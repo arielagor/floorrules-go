@@ -37,6 +37,9 @@ var (
 	// ErrLeaseLost: this worker stalled past its lease and another took the
 	// apply over. Its result was discarded; the successor's stands.
 	ErrLeaseLost = store.ErrLeaseLost
+	// ErrAttemptAbandoned: this key's attempt was interrupted and another
+	// key took the plan over. Its outcome is in the audit log, not here.
+	ErrAttemptAbandoned = errors.New("this key's apply was interrupted and superseded by another key; see the plan and its audit log")
 )
 
 // AutoPlannerConsumer names the rule.changed consumer for dedupe records.
@@ -285,7 +288,7 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	// 4. Execute, detached from the caller: a client disconnect must not
 	// abandon a plan halfway. The apply has its own deadline instead.
 	execCtx, cancelExec := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ApplyTimeout)
-	result := s.execute(execCtx, plan)
+	result := s.execute(execCtx, plan, attempt.FollowsInterrupted)
 	cancelExec()
 
 	// 5. Record on a fresh budget. execCtx may be exhausted by now (a slow
@@ -351,6 +354,9 @@ func (s *Service) replay(a domain.ApplyAttempt, hash string) (domain.ApplyResult
 	if a.RequestHash != hash {
 		return domain.ApplyResult{}, false, ErrIdempotencyKeyReused
 	}
+	if a.Status == domain.AttemptAbandoned {
+		return domain.ApplyResult{}, false, ErrAttemptAbandoned
+	}
 	if a.Status == domain.AttemptInProgress || a.Result == nil {
 		return domain.ApplyResult{}, false, ErrApplyInProgress
 	}
@@ -359,7 +365,7 @@ func (s *Service) replay(a domain.ApplyAttempt, hash string) (domain.ApplyResult
 
 // execute performs a plan's ops in order, stopping at the first permanent
 // failure. It never returns an error: every outcome is a result to record.
-func (s *Service) execute(ctx context.Context, plan domain.Plan) domain.ApplyResult {
+func (s *Service) execute(ctx context.Context, plan domain.Plan, followsInterrupted bool) domain.ApplyResult {
 	res := domain.ApplyResult{PlanID: plan.ID, Results: make([]domain.OpResult, 0, len(plan.Ops))}
 
 	floors, err := s.listFloors(ctx, plan.PublisherID)
@@ -369,7 +375,7 @@ func (s *Service) execute(ctx context.Context, plan domain.Plan) domain.ApplyRes
 	}
 	// Only the segments this plan writes are compared (domain.Footprint).
 	if domain.Footprint(plan.Ops, floors) != plan.BaseFingerprint {
-		res.Status, res.Reason = domain.PlanStale, "a segment this plan changes was modified on the platform since the plan was computed; compute a new plan"
+		res.Status, res.Reason = domain.PlanStale, staleReason(plan, floors, followsInterrupted)
 		return res
 	}
 
@@ -399,6 +405,27 @@ func (s *Service) execute(ctx context.Context, plan domain.Plan) domain.ApplyRes
 		res.Status, res.Reason = domain.PlanFailed, "the first op failed; nothing was changed"
 	}
 	return res
+}
+
+// staleReason tells the operator who changed the plan's segments (day-2
+// review L7). After a reclaim, the interrupted attempt's own writes used to
+// be reported as someone else's drift.
+func staleReason(plan domain.Plan, floors []domain.PlatformFloor, followsInterrupted bool) string {
+	done, foreign := domain.SplitDrift(plan.Ops, floors)
+	switch {
+	case foreign == 0 && done > 0 && followsInterrupted:
+		return fmt.Sprintf("an earlier attempt at this plan was interrupted after %d of its %d changes reached the platform "+
+			"(its plan.apply.started row is in the audit log); nothing else changed on these segments; compute a new plan to finish the rest",
+			done, len(plan.Ops))
+	case foreign == 0 && done > 0:
+		return fmt.Sprintf("%d of this plan's %d changes are already on the platform, made outside this plan; compute a new plan",
+			done, len(plan.Ops))
+	case followsInterrupted && done > 0:
+		return fmt.Sprintf("a segment this plan changes was modified on the platform since the plan was computed, "+
+			"and an earlier, interrupted attempt had already made %d of its changes; compute a new plan", done)
+	default:
+		return "a segment this plan changes was modified on the platform since the plan was computed; compute a new plan"
+	}
 }
 
 func (s *Service) applyOp(ctx context.Context, publisherID string, op domain.Op) error {

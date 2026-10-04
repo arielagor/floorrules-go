@@ -193,7 +193,8 @@ func TestEndToEnd_RulePlanApplyReplayAudit(t *testing.T) {
 	}
 
 	resp, body = e.do(t, call{method: "GET", path: "/v1/publishers/acme-tv/audit?limit=10", tok: tok})
-	if resp.StatusCode != 200 || len(body["entries"].([]any)) != 4 {
+	// rule.create, plan.create, plan.apply.started, plan.apply, rule.disable
+	if resp.StatusCode != 200 || len(body["entries"].([]any)) != 5 {
 		t.Fatalf("audit = %d %v", resp.StatusCode, body)
 	}
 	first := body["entries"].([]any)[0].(map[string]any)

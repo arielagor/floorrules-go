@@ -34,12 +34,15 @@ const (
 // Op is one platform change. Ops are written to be idempotent on the adapter
 // (set-to-value and delete-if-present), which is what makes retrying them safe.
 type Op struct {
-	Kind        OpKind  `json:"kind"`
-	Segment     Segment `json:"segment"`
-	FromMicros  int64   `json:"from_micros,omitempty"`
-	ToMicros    int64   `json:"to_micros,omitempty"`
-	Risky       bool    `json:"risky,omitempty"`
-	RiskyReason string  `json:"risky_reason,omitempty"`
+	Kind       OpKind  `json:"kind"`
+	Segment    Segment `json:"segment"`
+	FromMicros int64   `json:"from_micros,omitempty"`
+	// FromManagedBy is the owner of the floor an update or delete replaces,
+	// as seen at planning time.
+	FromManagedBy string `json:"from_managed_by,omitempty"`
+	ToMicros      int64  `json:"to_micros,omitempty"`
+	Risky         bool   `json:"risky,omitempty"`
+	RiskyReason   string `json:"risky_reason,omitempty"`
 }
 
 // PlanStatus is the lifecycle state of a plan.
@@ -110,7 +113,7 @@ func ComputeOps(rules []Rule, platform []PlatformFloor, limits PlanLimits) ([]Op
 	var deletes, updates, creates []Op
 	for key, f := range current {
 		if _, want := desired[key]; !want && f.ManagedBy == ManagedBy {
-			deletes = append(deletes, Op{Kind: OpDelete, Segment: f.Segment, FromMicros: f.FloorMicros})
+			deletes = append(deletes, Op{Kind: OpDelete, Segment: f.Segment, FromMicros: f.FloorMicros, FromManagedBy: f.ManagedBy})
 		}
 	}
 	for key, r := range desired {
@@ -119,7 +122,7 @@ func ComputeOps(rules []Rule, platform []PlatformFloor, limits PlanLimits) ([]Op
 		case !exists:
 			creates = append(creates, Op{Kind: OpCreate, Segment: r.Segment, ToMicros: r.FloorMicros})
 		case f.FloorMicros != r.FloorMicros || f.ManagedBy != ManagedBy:
-			op := Op{Kind: OpUpdate, Segment: r.Segment, FromMicros: f.FloorMicros, ToMicros: r.FloorMicros}
+			op := Op{Kind: OpUpdate, Segment: r.Segment, FromMicros: f.FloorMicros, FromManagedBy: f.ManagedBy, ToMicros: r.FloorMicros}
 			if f.ManagedBy != ManagedBy {
 				op.Risky = true
 				op.RiskyReason = "takes over a floor not managed by this service"
@@ -143,6 +146,41 @@ func ComputeOps(rules []Rule, platform []PlatformFloor, limits PlanLimits) ([]Op
 		return nil, fmt.Errorf("%w: %d ops, limit %d", ErrPlanTooLarge, len(out), limits.MaxOps)
 	}
 	return out, nil
+}
+
+// SplitDrift explains a footprint mismatch. Of the plan's ops, atTarget
+// already show the plan's own result (written by an interrupted earlier
+// attempt, or by someone making the same change) and foreign show neither
+// what the plan saw nor what it would write: a change nobody reviewed.
+func SplitDrift(ops []Op, platform []PlatformFloor) (atTarget, foreign int) {
+	current := make(map[string]PlatformFloor, len(platform))
+	for _, f := range platform {
+		current[f.Segment.Key()] = f
+	}
+	for _, op := range ops {
+		f, exists := current[op.Segment.Key()]
+		var target, source bool
+		switch op.Kind {
+		case OpCreate, OpUpdate:
+			target = exists && f.FloorMicros == op.ToMicros && f.ManagedBy == ManagedBy
+		case OpDelete:
+			target = !exists
+		}
+		switch op.Kind {
+		case OpCreate:
+			source = !exists
+		case OpUpdate, OpDelete:
+			// Plans stored before FromManagedBy existed compare the floor only.
+			source = exists && f.FloorMicros == op.FromMicros && (op.FromManagedBy == "" || f.ManagedBy == op.FromManagedBy)
+		}
+		switch {
+		case target:
+			atTarget++
+		case !source:
+			foreign++
+		}
+	}
+	return atTarget, foreign
 }
 
 // changePct returns the absolute percentage change from a to b, rounded down.

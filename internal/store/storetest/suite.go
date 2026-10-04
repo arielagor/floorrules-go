@@ -26,6 +26,7 @@ func Run(t *testing.T, newStore Factory) {
 	t.Run("PlanScopedToPublisher", func(t *testing.T) { testPlanScoped(t, newStore(t)) })
 	t.Run("ApplyIdempotency", func(t *testing.T) { testApplyIdempotency(t, newStore(t)) })
 	t.Run("ApplyLeaseReclaim", func(t *testing.T) { testLeaseReclaim(t, newStore(t)) })
+	t.Run("AbandonedAttemptFreesPlan", func(t *testing.T) { testAbandoned(t, newStore(t)) })
 	t.Run("ConcurrentBeginApply", func(t *testing.T) { testConcurrentBegin(t, newStore(t)) })
 	t.Run("ClaimRequiresPendingPlan", func(t *testing.T) { testClaimRequiresPending(t, newStore(t)) })
 	t.Run("IdempotencyKeysScopedToPublisher", func(t *testing.T) { testKeysScoped(t, newStore(t)) })
@@ -222,8 +223,12 @@ func testLeaseReclaim(t *testing.T, s store.Store) {
 	if got, _ := s.GetPlan(ctx, "pub-a", p.ID); got.Status != domain.PlanPending {
 		t.Fatalf("stale holder changed the plan to %s", got.Status)
 	}
-	if entries, _ := s.ListAudit(ctx, "pub-a", 10); len(entries) != 1 || entries[0].Action != "plan.create" {
-		t.Fatalf("stale holder wrote audit entries: %+v", entries)
+	if !b.FollowsInterrupted || first.FollowsInterrupted {
+		t.Fatalf("FollowsInterrupted: first=%v reclaim=%v; want only the reclaim marked", first.FollowsInterrupted, b.FollowsInterrupted)
+	}
+	// Each claim is on the record (L3); the stale holder added no result.
+	if got := actions(t, s, "pub-a"); !equal(got, []string{"plan.apply.started", "plan.apply.started", "plan.create"}) {
+		t.Fatalf("audit actions = %v; want a started row per claim and no plan.apply from the stale holder", got)
 	}
 
 	// The current holder records normally.
@@ -233,6 +238,99 @@ func testLeaseReclaim(t *testing.T, s store.Store) {
 	got, _ := s.GetAttempt(ctx, "pub-a", "key-1")
 	if got.Status != domain.AttemptSucceeded || got.Actor != "user:second" {
 		t.Fatalf("attempt = %+v, want succeeded by user:second", got)
+	}
+}
+
+func actions(t *testing.T, s store.Store, pub string) []string {
+	t.Helper()
+	entries, err := s.ListAudit(context.Background(), pub, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Action)
+	}
+	return out
+}
+
+func equal(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// testAbandoned (day-2 review L3): a client that loses its key used to
+// leave an in_progress attempt that blocked every other key on the plan
+// forever, and the crashed worker's platform writes had no audit row. Every
+// claim now writes plan.apply.started in its own transaction, and once the
+// lease has expired a new key supersedes the attempt: it is marked
+// abandoned, with an audit row and an event.
+func testAbandoned(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	p := newPlan("pub-a")
+	if err := s.CreatePlan(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	lost, created, err := s.BeginApply(ctx, attempt("lost-key", p.ID), time.Hour)
+	if err != nil || !created {
+		t.Fatalf("first claim = %v, %v", created, err)
+	}
+	if got := actions(t, s, "pub-a"); !equal(got, []string{"plan.apply.started", "plan.create"}) {
+		t.Fatalf("audit after the claim = %v; want plan.apply.started written with it", got)
+	}
+	// While its lease is live the attempt still holds the plan.
+	if _, _, err := s.BeginApply(ctx, attempt("new-key", p.ID), time.Hour); !errors.Is(err, store.ErrPlanBusy) {
+		t.Fatalf("other key, live lease: want ErrPlanBusy, got %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	const short = 10 * time.Millisecond
+	b, created, err := s.BeginApply(ctx, attempt("new-key", p.ID), short)
+	if err != nil || !created || b.Status != domain.AttemptInProgress || !b.FollowsInterrupted {
+		t.Fatalf("new key after the lease expired = %+v, %v, %v; want a claim that follows an interrupted one", b, created, err)
+	}
+	old, err := s.GetAttempt(ctx, "pub-a", "lost-key")
+	if err != nil || old.Status != domain.AttemptAbandoned || old.FinishedAt == nil {
+		t.Fatalf("superseded attempt = %+v, %v; want abandoned with finished_at", old, err)
+	}
+	if err := s.FinishApply(ctx, lost, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); !errors.Is(err, store.ErrLeaseLost) {
+		t.Fatalf("abandoned holder's FinishApply: want ErrLeaseLost, got %v", err)
+	}
+	// The lost key now answers from its record and is never reclaimed.
+	if again, created, err := s.BeginApply(ctx, attempt("lost-key", p.ID), short); err != nil || created || again.Status != domain.AttemptAbandoned {
+		t.Fatalf("lost key again = %+v, %v, %v; want its abandoned record", again, created, err)
+	}
+
+	want := []string{"plan.apply.started", "plan.apply.abandoned", "plan.apply.started", "plan.create"}
+	if got := actions(t, s, "pub-a"); !equal(got, want) {
+		t.Fatalf("audit actions = %v, want %v", got, want)
+	}
+	entries, _ := s.ListAudit(ctx, "pub-a", 50)
+	var detail map[string]any
+	_ = json.Unmarshal(entries[1].Detail, &detail)
+	if detail["idempotency_key"] != "lost-key" || detail["superseded_by"] != "new-key" {
+		t.Fatalf("abandoned audit detail = %s", entries[1].Detail)
+	}
+	evs, err := s.ClaimOutbox(ctx, 10, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].Topic != domain.TopicPlanApplyAbandoned {
+		t.Fatalf("outbox = %+v, want one %s event", evs, domain.TopicPlanApplyAbandoned)
+	}
+
+	if err := s.FinishApply(ctx, b, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetPlan(ctx, "pub-a", p.ID); got.Status != domain.PlanApplied {
+		t.Fatalf("plan = %s, want applied by the new key", got.Status)
 	}
 }
 
@@ -380,7 +478,7 @@ func testAuditOutbox(t *testing.T, s store.Store) {
 	for _, e := range entries {
 		actions = append(actions, e.Action)
 	}
-	wantActions := []string{"plan.apply", "plan.create", "rule.disable", "rule.create"}
+	wantActions := []string{"plan.apply", "plan.apply.started", "plan.create", "rule.disable", "rule.create"}
 	if len(actions) != len(wantActions) {
 		t.Fatalf("audit actions = %v, want %v (the failed duplicate must leave no trace)", actions, wantActions)
 	}

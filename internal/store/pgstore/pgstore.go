@@ -185,13 +185,15 @@ func (s *Store) GetPlan(ctx context.Context, publisherID, planID string) (domain
 	return p, nil
 }
 
-const attemptColumns = `idempotency_key, plan_id::text, request_hash, status, actor, result, started_at, finished_at`
+const attemptColumns = `idempotency_key, plan_id::text, request_hash, status, actor, result, started_at, finished_at,
+	attempt_token::text`
 
 func scanAttempt(row pgx.Row) (domain.ApplyAttempt, error) {
 	var a domain.ApplyAttempt
 	var status string
 	var result []byte
-	err := row.Scan(&a.IdempotencyKey, &a.PlanID, &a.RequestHash, &status, &a.Actor, &result, &a.StartedAt, &a.FinishedAt)
+	err := row.Scan(&a.IdempotencyKey, &a.PlanID, &a.RequestHash, &status, &a.Actor, &result, &a.StartedAt, &a.FinishedAt,
+		&a.Token)
 	if err != nil {
 		return a, err
 	}
@@ -215,15 +217,16 @@ func (s *Store) GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt
 	return a, err
 }
 
-// BeginApply implements store.Store.
-func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCutoff time.Time) (domain.ApplyAttempt, bool, error) {
+// BeginApply implements store.Store. The lease is compared with the
+// database's now(), the same clock that wrote started_at.
+func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease time.Duration) (domain.ApplyAttempt, bool, error) {
 	var out domain.ApplyAttempt
 	var created bool
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var err error
 		out, err = scanAttempt(tx.QueryRow(ctx, `INSERT INTO apply_attempts
-			(idempotency_key, plan_id, request_hash, status, actor)
-			VALUES ($1, $2, $3, 'in_progress', $4)
+			(idempotency_key, plan_id, request_hash, status, actor, attempt_token)
+			VALUES ($1, $2, $3, 'in_progress', $4, gen_random_uuid())
 			ON CONFLICT (idempotency_key) DO NOTHING
 			RETURNING `+attemptColumns, a.IdempotencyKey, a.PlanID, a.RequestHash, a.Actor))
 		if err == nil {
@@ -239,13 +242,22 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCuto
 		if err != nil {
 			return err
 		}
-		if out.Status == domain.AttemptInProgress && out.RequestHash == a.RequestHash && out.StartedAt.Before(leaseCutoff) {
-			out, err = scanAttempt(tx.QueryRow(ctx, `UPDATE apply_attempts
-				SET started_at = now(), actor = $2 WHERE idempotency_key = $1
-				RETURNING `+attemptColumns, a.IdempotencyKey, a.Actor))
-			created = err == nil
+		if out.Status != domain.AttemptInProgress || out.RequestHash != a.RequestHash {
+			return nil
+		}
+		// Reclaim only if the lease has expired. A new token fences off the
+		// previous holder, should it still be running.
+		reclaimed, err := scanAttempt(tx.QueryRow(ctx, `UPDATE apply_attempts
+			SET started_at = now(), actor = $2, attempt_token = gen_random_uuid()
+			WHERE idempotency_key = $1 AND started_at < now() - ($3::bigint * interval '1 millisecond')
+			RETURNING `+attemptColumns, a.IdempotencyKey, a.Actor, lease.Milliseconds()))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // lease still live: the holder is presumed to be running
+		}
+		if err != nil {
 			return err
 		}
+		out, created = reclaimed, true
 		return nil
 	})
 	if constraintViolated(err, "apply_attempts_one_inflight_per_plan") {
@@ -254,11 +266,14 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCuto
 	if err != nil {
 		return domain.ApplyAttempt{}, false, err
 	}
+	if !created {
+		out.Token = "" // only the claimant gets a usable token
+	}
 	return out, created, nil
 }
 
 // FinishApply implements store.Store.
-func (s *Store) FinishApply(ctx context.Context, publisherID, key, actor string, result domain.ApplyResult) error {
+func (s *Store) FinishApply(ctx context.Context, publisherID string, a domain.ApplyAttempt, result domain.ApplyResult) error {
 	status := domain.AttemptFailed
 	if result.Status == domain.PlanApplied {
 		status = domain.AttemptSucceeded
@@ -269,14 +284,24 @@ func (s *Store) FinishApply(ctx context.Context, publisherID, key, actor string,
 	}
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var planID string
-		err := tx.QueryRow(ctx, `UPDATE apply_attempts SET status = $2, result = $3, finished_at = now()
-			WHERE idempotency_key = $1 RETURNING plan_id::text`, key, string(status), raw).Scan(&planID)
+		err := tx.QueryRow(ctx, `UPDATE apply_attempts SET status = $3, result = $4, finished_at = now()
+			WHERE idempotency_key = $1 AND attempt_token::text = $2 AND status = 'in_progress'
+			RETURNING plan_id::text`, a.IdempotencyKey, a.Token, string(status), raw).Scan(&planID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return store.ErrNotFound
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM apply_attempts WHERE idempotency_key = $1)`,
+				a.IdempotencyKey).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return store.ErrNotFound
+			}
+			return store.ErrLeaseLost
 		}
 		if err != nil {
 			return err
 		}
+		actor, key := a.Actor, a.IdempotencyKey
 		tag, err := tx.Exec(ctx, `UPDATE plans SET status = $3 WHERE id = $1 AND publisher_id = $2`,
 			planID, publisherID, string(result.Status))
 		if err != nil {

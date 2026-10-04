@@ -19,6 +19,10 @@ var (
 	ErrConflict = errors.New("an active rule already exists for this segment")
 	// ErrPlanBusy means a different idempotency key is already applying the plan.
 	ErrPlanBusy = errors.New("another apply of this plan is in progress")
+	// ErrLeaseLost means the caller's claim on an attempt is no longer
+	// current: its lease expired and another worker reclaimed the attempt,
+	// or the attempt already finished. The caller's result is not recorded.
+	ErrLeaseLost = errors.New("apply lease lost: another worker took over this attempt")
 )
 
 // Store is the persistence contract. Every method that changes state writes
@@ -40,16 +44,22 @@ type Store interface {
 
 	// GetAttempt returns the attempt stored under an idempotency key, or ErrNotFound.
 	GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error)
-	// BeginApply claims an idempotency key. If the key is new it inserts a
+	// BeginApply claims an idempotency key. If the key is new it inserts an
 	// in_progress attempt and returns (attempt, true). If the key exists it
 	// returns the stored attempt and false, except that an in_progress
-	// attempt with the same request hash that started before leaseCutoff is
-	// presumed abandoned (its worker crashed) and is reclaimed: (attempt, true).
-	// Returns ErrPlanBusy if another key holds an in_progress attempt on the plan.
-	BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCutoff time.Time) (domain.ApplyAttempt, bool, error)
+	// attempt with the same request hash that started more than lease ago is
+	// presumed abandoned (its worker crashed or stalled) and is reclaimed:
+	// (attempt, true). Lease age is measured on the store's clock, never the
+	// caller's. A claimed attempt carries a new Token; any earlier holder's
+	// token stops working. Returns ErrPlanBusy if another key holds an
+	// in_progress attempt on the plan.
+	BeginApply(ctx context.Context, a domain.ApplyAttempt, lease time.Duration) (domain.ApplyAttempt, bool, error)
 	// FinishApply records the outcome on the attempt and the plan, and writes
-	// an audit entry and a plan.applied event, atomically.
-	FinishApply(ctx context.Context, publisherID, key, actor string, result domain.ApplyResult) error
+	// an audit entry and a plan.applied event, atomically. It is fenced: it
+	// writes only if a (key, Token) is still the current in_progress claim,
+	// and otherwise returns ErrLeaseLost and changes nothing. a.Actor is the
+	// audit actor. Being fenced, it is safe to retry.
+	FinishApply(ctx context.Context, publisherID string, a domain.ApplyAttempt, result domain.ApplyResult) error
 
 	ListAudit(ctx context.Context, publisherID string, limit int) ([]domain.AuditEntry, error)
 

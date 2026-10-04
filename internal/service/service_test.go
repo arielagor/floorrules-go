@@ -10,6 +10,7 @@ import (
 	"github.com/arielagor/floorrules-go/internal/domain"
 	"github.com/arielagor/floorrules-go/internal/events"
 	"github.com/arielagor/floorrules-go/internal/metrics"
+	"github.com/arielagor/floorrules-go/internal/store"
 	"github.com/arielagor/floorrules-go/internal/store/memstore"
 )
 
@@ -29,8 +30,24 @@ func newHarness(t *testing.T) harness {
 	m := metrics.New()
 	retry := adapter.DefaultRetryPolicy()
 	retry.Sleep = func(context.Context, time.Duration) error { return nil } // no real waiting in tests
-	svc := New(st, ssp, Config{Retry: retry, Metrics: m})
+	svc := mustNew(t, st, ssp, Config{Retry: retry, Metrics: m})
 	return harness{svc: svc, st: st, ssp: ssp, m: m}
+}
+
+func mustNew(t *testing.T, st store.Store, ssp adapter.SSP, cfg Config) *Service {
+	t.Helper()
+	svc, err := New(st, ssp, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
+}
+
+func TestNew_RejectsLeaseShorterThanAnApply(t *testing.T) {
+	_, err := New(memstore.New(), adapter.NewMock(), Config{ApplyTimeout: 2 * time.Minute, ApplyLease: time.Minute})
+	if err == nil {
+		t.Fatal("a lease an apply can outlive must be rejected")
+	}
 }
 
 func seg(device, geo string) domain.Segment {
@@ -285,7 +302,7 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 	hash := requestHash(p.ID, false)
 
 	// Simulate a worker that claimed the key and is still running.
-	if _, _, err := h.st.BeginApply(ctx, domain.ApplyAttempt{IdempotencyKey: "lease-key-01", PlanID: p.ID, RequestHash: hash, Actor: "user:ops"}, time.Now().Add(-time.Hour)); err != nil {
+	if _, _, err := h.st.BeginApply(ctx, domain.ApplyAttempt{IdempotencyKey: "lease-key-01", PlanID: p.ID, RequestHash: hash, Actor: "user:ops"}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "lease-key-01", false); !errors.Is(err, ErrApplyInProgress) {
@@ -295,8 +312,9 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 		t.Fatalf("other key, plan busy: want ErrApplyInProgress, got %v", err)
 	}
 
-	// Ten minutes later the worker is presumed dead; the same key reclaims it.
-	h.svc.cfg.Now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	// Ten minutes later (on the store's clock, which measures leases) the
+	// worker is presumed dead; the same key reclaims it.
+	h.st.SetClock(func() time.Time { return time.Now().Add(10 * time.Minute) })
 	res, replayed, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "lease-key-01", false)
 	if err != nil || replayed || res.Status != domain.PlanApplied {
 		t.Fatalf("reclaim = %+v replayed=%v err=%v", res, replayed, err)
@@ -325,7 +343,7 @@ func TestApply_SurvivesClientDisconnect(t *testing.T) {
 	st := memstore.New()
 	retry := adapter.DefaultRetryPolicy()
 	retry.Sleep = func(context.Context, time.Duration) error { return nil }
-	svc := New(st, disconnectingSSP{Mock: adapter.NewMock(), cancel: cancel}, Config{Retry: retry})
+	svc := mustNew(t, st, disconnectingSSP{Mock: adapter.NewMock(), cancel: cancel}, Config{Retry: retry})
 	h := harness{svc: svc, st: st}
 	h.rule(t, "ctv", "US", 2_000_000)
 	h.rule(t, "ctv", "CA", 2_000_000)
@@ -358,7 +376,7 @@ func TestApply_SlowPlatformStillRecordsResult(t *testing.T) {
 	retry := adapter.DefaultRetryPolicy()
 	retry.PerAttempt = 0 // one attempt runs to the overall deadline
 	retry.Sleep = func(context.Context, time.Duration) error { return nil }
-	svc := New(st, hangingSSP{adapter.NewMock()}, Config{Retry: retry, Metrics: m, ApplyTimeout: 50 * time.Millisecond})
+	svc := mustNew(t, st, hangingSSP{adapter.NewMock()}, Config{Retry: retry, Metrics: m, ApplyTimeout: 50 * time.Millisecond})
 	h := harness{svc: svc, st: st, m: m}
 	h.rule(t, "ctv", "US", 2_000_000)
 	p := h.plan(t)

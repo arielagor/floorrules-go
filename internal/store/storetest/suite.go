@@ -122,30 +122,36 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	if err := s.CreatePlan(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	past := time.Now().Add(-time.Hour)
+	const lease = time.Hour
 
 	if _, err := s.GetAttempt(ctx, "key-1"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetAttempt before begin: want ErrNotFound, got %v", err)
 	}
-	a, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), past)
-	if err != nil || !created || a.Status != domain.AttemptInProgress {
-		t.Fatalf("first BeginApply = %+v, %v, %v", a, created, err)
+	a, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), lease)
+	if err != nil || !created || a.Status != domain.AttemptInProgress || a.Token == "" {
+		t.Fatalf("first BeginApply = %+v, %v, %v; want created with a token", a, created, err)
 	}
-	again, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), past)
+	again, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), lease)
 	if err != nil || created || again.Status != domain.AttemptInProgress {
 		t.Fatalf("repeat BeginApply = %+v, %v, %v; want existing in-progress, not created", again, created, err)
 	}
-	if _, _, err := s.BeginApply(ctx, attempt("key-2", p.ID), past); !errors.Is(err, store.ErrPlanBusy) {
+	if again.Token != "" {
+		t.Fatal("a caller that did not claim the attempt was handed its token")
+	}
+	if _, _, err := s.BeginApply(ctx, attempt("key-2", p.ID), lease); !errors.Is(err, store.ErrPlanBusy) {
 		t.Fatalf("second key on busy plan: want ErrPlanBusy, got %v", err)
 	}
 
 	result := domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied, Results: []domain.OpResult{
 		{Op: p.Ops[0], Outcome: domain.OutcomeApplied, Attempts: 2},
 	}}
-	if err := s.FinishApply(ctx, "pub-a", "key-1", "user:test", result); err != nil {
+	if err := s.FinishApply(ctx, "pub-a", a, result); err != nil {
 		t.Fatal(err)
 	}
-	done, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), past)
+	if err := s.FinishApply(ctx, "pub-a", a, result); !errors.Is(err, store.ErrLeaseLost) {
+		t.Fatalf("finishing a finished attempt: want ErrLeaseLost, got %v", err)
+	}
+	done, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), lease)
 	if err != nil || created || done.Status != domain.AttemptSucceeded || done.Result == nil {
 		t.Fatalf("replay after finish = %+v, %v, %v", done, created, err)
 	}
@@ -162,30 +168,68 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	if plan.Status != domain.PlanApplied {
 		t.Fatalf("plan status = %s, want applied", plan.Status)
 	}
-	if err := s.FinishApply(ctx, "pub-a", "no-such-key", "user:test", result); !errors.Is(err, store.ErrNotFound) {
+	if err := s.FinishApply(ctx, "pub-a", attempt("no-such-key", p.ID), result); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("finish unknown key: want ErrNotFound, got %v", err)
 	}
 }
 
+// testLeaseReclaim covers reclaim and fencing (day-2 review M1): once an
+// expired attempt is reclaimed, the previous holder's token is dead and its
+// late result changes nothing.
 func testLeaseReclaim(t *testing.T, s store.Store) {
 	ctx := context.Background()
 	p := newPlan("pub-a")
 	if err := s.CreatePlan(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.BeginApply(ctx, attempt("key-1", p.ID), time.Now().Add(-time.Hour)); err != nil {
+	first, _, err := s.BeginApply(ctx, attempt("key-1", p.ID), time.Hour)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if _, created, _ := s.BeginApply(ctx, attempt("key-1", p.ID), time.Hour); created {
+		t.Fatal("reclaimed an attempt whose lease is still live")
+	}
+	// Let the attempt age past a short lease (both stores measure age on
+	// their own clock, so the test waits rather than moving a clock).
+	time.Sleep(50 * time.Millisecond)
+	const short = 10 * time.Millisecond
+
 	// A different request body under the same key is never reclaimed.
 	other := attempt("key-1", p.ID)
 	other.RequestHash = "h2"
-	if _, created, _ := s.BeginApply(ctx, other, time.Now().Add(time.Hour)); created {
+	if _, created, _ := s.BeginApply(ctx, other, short); created {
 		t.Fatal("reclaimed an attempt whose request hash differs")
 	}
-	// Same request, cutoff in the future: the attempt counts as abandoned.
-	a, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), time.Now().Add(time.Hour))
-	if err != nil || !created || a.Status != domain.AttemptInProgress {
-		t.Fatalf("reclaim = %+v, %v, %v", a, created, err)
+	// Same request, lease expired: the attempt counts as abandoned.
+	second := attempt("key-1", p.ID)
+	second.Actor = "user:second"
+	b, created, err := s.BeginApply(ctx, second, short)
+	if err != nil || !created || b.Status != domain.AttemptInProgress {
+		t.Fatalf("reclaim = %+v, %v, %v", b, created, err)
+	}
+	if b.Token == "" || b.Token == first.Token {
+		t.Fatalf("reclaim must issue a new token: first=%q second=%q", first.Token, b.Token)
+	}
+
+	// The first holder wakes up: its result is refused and changes nothing.
+	failed := domain.ApplyResult{PlanID: p.ID, Status: domain.PlanFailed}
+	if err := s.FinishApply(ctx, "pub-a", first, failed); !errors.Is(err, store.ErrLeaseLost) {
+		t.Fatalf("stale holder's FinishApply: want ErrLeaseLost, got %v", err)
+	}
+	if got, _ := s.GetPlan(ctx, "pub-a", p.ID); got.Status != domain.PlanPending {
+		t.Fatalf("stale holder changed the plan to %s", got.Status)
+	}
+	if entries, _ := s.ListAudit(ctx, "pub-a", 10); len(entries) != 1 || entries[0].Action != "plan.create" {
+		t.Fatalf("stale holder wrote audit entries: %+v", entries)
+	}
+
+	// The current holder records normally.
+	if err := s.FinishApply(ctx, "pub-a", b, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetAttempt(ctx, "key-1")
+	if got.Status != domain.AttemptSucceeded || got.Actor != "user:second" {
+		t.Fatalf("attempt = %+v, want succeeded by user:second", got)
 	}
 }
 
@@ -207,7 +251,7 @@ func testConcurrentBegin(t *testing.T, s store.Store) {
 			if i%2 == 1 {
 				key = "other-" + id.New()
 			}
-			_, created, err := s.BeginApply(ctx, attempt(key, p.ID), time.Now().Add(-time.Hour))
+			_, created, err := s.BeginApply(ctx, attempt(key, p.ID), time.Hour)
 			mu.Lock()
 			defer mu.Unlock()
 			if errors.Is(err, store.ErrPlanBusy) {
@@ -244,10 +288,11 @@ func testAuditOutbox(t *testing.T, s store.Store) {
 	if err := s.CreatePlan(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.BeginApply(ctx, attempt("k", p.ID), time.Now().Add(-time.Hour)); err != nil {
+	claim, _, err := s.BeginApply(ctx, attempt("k", p.ID), time.Hour)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishApply(ctx, "pub-a", "k", "user:ops", domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+	if err := s.FinishApply(ctx, "pub-a", claim, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
 		t.Fatal(err)
 	}
 

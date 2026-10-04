@@ -34,6 +34,9 @@ var (
 	ErrInvalidIdempotencyKey = errors.New("Idempotency-Key header must be 8-128 chars of [A-Za-z0-9._:-]")
 	ErrPlatformUnavailable   = errors.New("ad platform unavailable")
 	ErrShuttingDown          = errors.New("instance is shutting down; retry the request")
+	// ErrLeaseLost: this worker stalled past its lease and another took the
+	// apply over. Its result was discarded; the successor's stands.
+	ErrLeaseLost = store.ErrLeaseLost
 )
 
 // AutoPlannerConsumer names the rule.changed consumer for dedupe records.
@@ -67,8 +70,10 @@ type Service struct {
 	inflight sync.WaitGroup
 }
 
-// New builds a Service, filling unset config with defaults.
-func New(st store.Store, ssp adapter.SSP, cfg Config) *Service {
+// New builds a Service, filling unset config with defaults. It refuses a
+// lease that an apply can outlive: a second worker would reclaim an attempt
+// that is still running, and both would write to the platform.
+func New(st store.Store, ssp adapter.SSP, cfg Config) (*Service, error) {
 	if cfg.Limits.MaxOps == 0 {
 		cfg.Limits = domain.DefaultLimits
 	}
@@ -90,7 +95,11 @@ func New(st store.Store, ssp adapter.SSP, cfg Config) *Service {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	return &Service{store: st, ssp: ssp, cfg: cfg}
+	if cfg.ApplyLease <= cfg.ApplyTimeout+cfg.RecordTimeout {
+		return nil, fmt.Errorf("service: ApplyLease (%s) must exceed ApplyTimeout + RecordTimeout (%s)",
+			cfg.ApplyLease, cfg.ApplyTimeout+cfg.RecordTimeout)
+	}
+	return &Service{store: st, ssp: ssp, cfg: cfg}, nil
 }
 
 // Ready reports whether dependencies are reachable.
@@ -230,14 +239,13 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	}
 	defer s.inflight.Done()
 	hash := requestHash(planID, ackRisky)
-	leaseCutoff := s.cfg.Now().Add(-s.cfg.ApplyLease)
 
 	// 1. A key we have seen is answered from the record, before any state
-	// checks, unless it is an abandoned attempt that BeginApply may reclaim.
+	// checks. An in-progress attempt for the same request goes on to
+	// BeginApply, which decides on the database's clock whether its lease
+	// has expired and it may be reclaimed.
 	if prior, err := s.store.GetAttempt(ctx, key); err == nil {
-		abandoned := prior.Status == domain.AttemptInProgress && prior.RequestHash == hash &&
-			prior.StartedAt.Before(leaseCutoff)
-		if !abandoned {
+		if prior.Status != domain.AttemptInProgress || prior.RequestHash != hash {
 			return s.replay(prior, hash)
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
@@ -259,7 +267,7 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	// 3. Claim the key. Losing a race to the same key falls back to replay.
 	attempt, created, err := s.store.BeginApply(ctx, domain.ApplyAttempt{
 		IdempotencyKey: key, PlanID: planID, RequestHash: hash, Actor: actor,
-	}, leaseCutoff)
+	}, s.cfg.ApplyLease)
 	if errors.Is(err, store.ErrPlanBusy) {
 		return domain.ApplyResult{}, false, ErrApplyInProgress
 	}
@@ -281,7 +289,15 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	// audit row and event for changes that did happen.
 	recCtx, cancelRec := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.RecordTimeout)
 	defer cancelRec()
-	if err := s.store.FinishApply(recCtx, publisherID, key, actor, result); err != nil {
+	if err := s.record(recCtx, publisherID, attempt, result); err != nil {
+		if errors.Is(err, store.ErrLeaseLost) {
+			// Another worker reclaimed this attempt while we were stalled.
+			// Its record stands; ours is discarded rather than overwriting it.
+			s.cfg.Log.Warn("apply result discarded: lease was taken over", "plan_id", planID, "key", key,
+				"status", result.Status)
+			s.cfg.Metrics.Inc("apply_lease_lost_total")
+			return domain.ApplyResult{}, false, ErrLeaseLost
+		}
 		s.cfg.Log.Error("apply finished but not recorded", "plan_id", planID, "key", key, "err", err)
 		s.cfg.Metrics.Inc("apply_record_failures_total")
 		return domain.ApplyResult{}, false, err
@@ -289,6 +305,42 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	s.cfg.Metrics.Inc("apply_total", "status", string(result.Status))
 	s.cfg.Log.Info("plan applied", "plan_id", planID, "publisher_id", publisherID, "status", result.Status, "actor", actor)
 	return result, false, nil
+}
+
+// record writes an apply's result, retrying transient store errors within
+// ctx. Retrying is safe because FinishApply is fenced on the attempt token:
+// a retry after a commit whose reply was lost gets ErrLeaseLost, which is
+// told apart from a real takeover by re-reading the attempt.
+func (s *Service) record(ctx context.Context, publisherID string, a domain.ApplyAttempt, result domain.ApplyResult) error {
+	var err error
+	for try := 1; ; try++ {
+		err = s.store.FinishApply(ctx, publisherID, a, result)
+		if err == nil || errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if errors.Is(err, store.ErrLeaseLost) {
+			if try > 1 && s.recordedByUs(ctx, a) {
+				return nil
+			}
+			return err
+		}
+		if try == 3 || ctx.Err() != nil {
+			return err
+		}
+		s.cfg.Log.Warn("recording apply result failed; retrying", "key", a.IdempotencyKey, "try", try, "err", err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(try) * 200 * time.Millisecond):
+		}
+	}
+}
+
+// recordedByUs reports whether the attempt finished under our token, i.e. an
+// earlier FinishApply committed even though its reply was lost.
+func (s *Service) recordedByUs(ctx context.Context, a domain.ApplyAttempt) bool {
+	got, err := s.store.GetAttempt(ctx, a.IdempotencyKey)
+	return err == nil && got.Status != domain.AttemptInProgress && got.Token == a.Token
 }
 
 func (s *Service) replay(a domain.ApplyAttempt, hash string) (domain.ApplyResult, bool, error) {

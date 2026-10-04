@@ -89,10 +89,13 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o runOpts) er
 	if ssp == nil {
 		ssp = adapter.NewMock()
 	}
-	svc := service.New(st, ssp, service.Config{
+	svc, err := service.New(st, ssp, service.Config{
 		Log: log, Metrics: m,
 		ApplyTimeout: cfg.ApplyTimeout, RecordTimeout: cfg.RecordTimeout, ApplyLease: cfg.ApplyLease,
 	})
+	if err != nil {
+		return err
+	}
 
 	queue := events.NewMemQueue(1024, 5, log)
 	queue.Subscribe(domain.TopicRuleChanged, svc.HandleRuleChanged)

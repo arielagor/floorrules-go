@@ -370,7 +370,8 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "not found", nil)
 	case errors.Is(err, service.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)
-	case errors.Is(err, service.ErrPlanNotPending), errors.Is(err, service.ErrApplyInProgress):
+	case errors.Is(err, service.ErrPlanNotPending), errors.Is(err, service.ErrApplyInProgress),
+		errors.Is(err, service.ErrLeaseLost):
 		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)
 	case errors.Is(err, service.ErrInvalidIdempotencyKey):
 		writeError(w, http.StatusBadRequest, "invalid_idempotency_key", err.Error(), nil)

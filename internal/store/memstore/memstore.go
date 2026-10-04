@@ -178,21 +178,25 @@ func (s *Store) GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt
 	return a, nil
 }
 
-// BeginApply implements store.Store.
-func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCutoff time.Time) (domain.ApplyAttempt, bool, error) {
+// BeginApply implements store.Store. The lease is measured on the store's
+// clock (SetClock), like Postgres measures it on now().
+func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease time.Duration) (domain.ApplyAttempt, bool, error) {
 	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
 		return domain.ApplyAttempt{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now().UTC()
 	if existing, ok := s.attempts[a.IdempotencyKey]; ok {
 		if existing.Status == domain.AttemptInProgress && existing.RequestHash == a.RequestHash &&
-			existing.StartedAt.Before(leaseCutoff) {
-			existing.StartedAt = s.now().UTC()
+			existing.StartedAt.Before(now.Add(-lease)) {
+			existing.StartedAt = now
 			existing.Actor = a.Actor
+			existing.Token = id.New() // fences off the previous holder
 			s.attempts[a.IdempotencyKey] = existing
 			return existing, true, nil
 		}
+		existing.Token = "" // only the claimant gets a usable token
 		return existing, false, nil
 	}
 	for _, other := range s.attempts {
@@ -201,23 +205,28 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, leaseCuto
 		}
 	}
 	a.Status = domain.AttemptInProgress
-	a.StartedAt = s.now().UTC()
+	a.StartedAt = now
 	a.Result = nil
 	a.FinishedAt = nil
+	a.Token = id.New()
 	s.attempts[a.IdempotencyKey] = a
 	return a, true, nil
 }
 
 // FinishApply implements store.Store.
-func (s *Store) FinishApply(ctx context.Context, publisherID, key, actor string, result domain.ApplyResult) error {
+func (s *Store) FinishApply(ctx context.Context, publisherID string, claim domain.ApplyAttempt, result domain.ApplyResult) error {
 	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key, actor := claim.IdempotencyKey, claim.Actor
 	a, ok := s.attempts[key]
 	if !ok {
 		return store.ErrNotFound
+	}
+	if a.Status != domain.AttemptInProgress || claim.Token == "" || a.Token != claim.Token {
+		return store.ErrLeaseLost
 	}
 	p, ok := s.plans[a.PlanID]
 	if !ok || p.PublisherID != publisherID {

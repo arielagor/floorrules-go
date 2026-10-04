@@ -49,7 +49,10 @@ func newEnv(t *testing.T, st store.Store) env {
 	log := slog.New(slog.NewJSONHandler(logs, nil))
 	retry := adapter.DefaultRetryPolicy()
 	retry.Sleep = func(context.Context, time.Duration) error { return nil }
-	svc := service.New(st, ssp, service.Config{Retry: retry, Metrics: m, Log: log})
+	svc, err := service.New(st, ssp, service.Config{Retry: retry, Metrics: m, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
 	v, err := auth.NewHMACVerifier(key, issuer, audience)
 	if err != nil {
 		t.Fatal(err)

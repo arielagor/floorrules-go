@@ -52,6 +52,9 @@ type ApplyAttempt struct {
 	Result         *ApplyResult  `json:"result,omitempty"`
 	StartedAt      time.Time     `json:"started_at"`
 	FinishedAt     *time.Time    `json:"finished_at,omitempty"`
+	// Token fences the attempt: it changes on every claim (insert or lease
+	// reclaim), and only the holder of the current token may record a result.
+	Token string `json:"-"`
 }
 
 // AuditEntry is an append-only record of who changed what.

@@ -120,6 +120,25 @@ func TestApply_HappyPathAndReplay(t *testing.T) {
 	}
 }
 
+func TestApply_RefusedOnceShutdownBegins(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.rule(t, "ctv", "US", 2_000_000)
+	p := h.plan(t)
+	if err := h.svc.WaitForApplies(ctx); err != nil { // nothing in flight: returns at once
+		t.Fatal(err)
+	}
+	if _, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "apply-key-0001", false); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("apply after shutdown began: want ErrShuttingDown, got %v", err)
+	}
+	if h.ssp.Calls("SetFloor") != 0 {
+		t.Fatal("a refused apply touched the platform")
+	}
+	if _, err := h.st.GetAttempt(ctx, "apply-key-0001"); err == nil {
+		t.Fatal("a refused apply consumed its idempotency key")
+	}
+}
+
 func TestApply_KeyReuseAndValidation(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()

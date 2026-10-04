@@ -380,6 +380,10 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, service.ErrPlatformUnavailable):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "platform_unavailable", "ad platform unavailable, retry later", nil)
+	case errors.Is(err, service.ErrShuttingDown):
+		// Nothing was claimed, so the same Idempotency-Key is safe to resend.
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "shutting_down", err.Error(), nil)
 	default:
 		// Internal detail goes to the log with the request ID, never to the client.
 		s.Log.Error("request failed", "request_id", requestIDFrom(r.Context()), "err", err)

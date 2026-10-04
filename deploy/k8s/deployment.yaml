@@ -24,8 +24,12 @@ spec:
       serviceAccountName: floorsvc
       # Workload Identity uses the GKE metadata server, not a mounted KSA token.
       automountServiceAccountToken: false
-      # Must exceed SHUTDOWN_DRAIN + SHUTDOWN_WAIT so in-flight applies finish.
-      terminationGracePeriodSeconds: 40
+      # On SIGTERM the process fails readiness (SHUTDOWN_DRAIN), stops the
+      # HTTP server, then waits for in-flight applies to record their result
+      # (up to APPLY_TIMEOUT + RECORD_TIMEOUT). The grace period must cover
+      # 5s + 2m10s + margin, or SIGKILL cuts an apply off midway.
+      # cmd/floorsvc/deploy_test.go pins this.
+      terminationGracePeriodSeconds: 150
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -66,6 +70,12 @@ spec:
               value: 5s
             - name: SHUTDOWN_WAIT
               value: 20s
+            - name: APPLY_TIMEOUT
+              value: 2m
+            - name: RECORD_TIMEOUT
+              value: 10s
+            - name: APPLY_LEASE
+              value: 5m
             # Secrets arrive as files, never as env values.
             - name: AUTH_HMAC_SECRET_FILE
               value: /var/run/secrets/floorrules/auth-hmac-secret

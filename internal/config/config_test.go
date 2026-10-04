@@ -72,6 +72,21 @@ func TestLoad_ReportsAllProblemsWithoutLeakingValues(t *testing.T) {
 	}
 }
 
+func TestLoad_LeaseMustOutliveApplyAndRecord(t *testing.T) {
+	base := map[string]string{"STORE_BACKEND": "memory", "AUTH_HMAC_SECRET": secret32, "AUTH_ISSUER": "dev"}
+	c, err := Load(env(base), noFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ApplyTimeout != 2*time.Minute || c.RecordTimeout != 10*time.Second || c.ApplyLease != 5*time.Minute {
+		t.Fatalf("apply defaults wrong: %+v", c)
+	}
+	base["APPLY_TIMEOUT"], base["RECORD_TIMEOUT"], base["APPLY_LEASE"] = "2m", "10s", "2m"
+	if _, err := Load(env(base), noFiles); err == nil || !strings.Contains(err.Error(), "APPLY_LEASE") {
+		t.Fatalf("a lease shorter than an apply must be rejected, got %v", err)
+	}
+}
+
 func TestLoad_UnreadableSecretFileAndBadBackend(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"AUTH_HMAC_SECRET_FILE": "/nope", "AUTH_ISSUER": "x", "STORE_BACKEND": "sqlite",

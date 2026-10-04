@@ -26,6 +26,12 @@ type Config struct {
 	ShutdownDrain  time.Duration
 	ShutdownWait   time.Duration
 	OutboxInterval time.Duration
+	// ApplyTimeout bounds executing one plan; RecordTimeout bounds writing
+	// its result. ApplyLease is how long an in-progress attempt is trusted
+	// before another request may reclaim it, so it must exceed both.
+	ApplyTimeout  time.Duration
+	RecordTimeout time.Duration
+	ApplyLease    time.Duration
 }
 
 // Getenv matches os.Getenv; tests pass a map lookup.
@@ -46,6 +52,9 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 		ShutdownDrain:  5 * time.Second,
 		ShutdownWait:   20 * time.Second,
 		OutboxInterval: time.Second,
+		ApplyTimeout:   2 * time.Minute,
+		RecordTimeout:  10 * time.Second,
+		ApplyLease:     5 * time.Minute,
 	}
 
 	secret, err := secretValue(getenv, readFile, "AUTH_HMAC_SECRET")
@@ -81,7 +90,10 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 	for _, d := range []struct {
 		name string
 		dst  *time.Duration
-	}{{"SHUTDOWN_DRAIN", &c.ShutdownDrain}, {"SHUTDOWN_WAIT", &c.ShutdownWait}, {"OUTBOX_INTERVAL", &c.OutboxInterval}} {
+	}{
+		{"SHUTDOWN_DRAIN", &c.ShutdownDrain}, {"SHUTDOWN_WAIT", &c.ShutdownWait}, {"OUTBOX_INTERVAL", &c.OutboxInterval},
+		{"APPLY_TIMEOUT", &c.ApplyTimeout}, {"RECORD_TIMEOUT", &c.RecordTimeout}, {"APPLY_LEASE", &c.ApplyLease},
+	} {
 		if v := getenv(d.name); v != "" {
 			parsed, err := time.ParseDuration(v)
 			if err != nil || parsed < 0 {
@@ -90,6 +102,15 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 			}
 			*d.dst = parsed
 		}
+	}
+	if c.ApplyTimeout <= 0 || c.RecordTimeout <= 0 {
+		errs = append(errs, errors.New("APPLY_TIMEOUT and RECORD_TIMEOUT must be positive"))
+	}
+	if c.ApplyLease <= c.ApplyTimeout+c.RecordTimeout {
+		// A shorter lease lets a second worker reclaim an attempt that is
+		// still running, and both would write to the platform.
+		errs = append(errs, fmt.Errorf("APPLY_LEASE (%s) must exceed APPLY_TIMEOUT + RECORD_TIMEOUT (%s)",
+			c.ApplyLease, c.ApplyTimeout+c.RecordTimeout))
 	}
 	return c, errors.Join(errs...)
 }

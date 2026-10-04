@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,13 +31,13 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := mainErr(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func mainErr() error {
 	cfg, err := config.FromOS()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -46,12 +47,29 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return run(ctx, cfg, log, runOpts{})
+}
 
-	st, closeStore, err := openStore(ctx, cfg, log)
-	if err != nil {
-		return err
+// runOpts lets tests inject collaborators. Zero values mean production
+// defaults: the store from cfg, the mock SSP, a listener on cfg.ListenAddr.
+type runOpts struct {
+	store    store.Store
+	ssp      adapter.SSP
+	listener net.Listener
+}
+
+// run serves until ctx is cancelled, then shuts down gracefully.
+func run(ctx context.Context, cfg config.Config, log *slog.Logger, o runOpts) error {
+	st := o.store
+	if st == nil {
+		var closeStore func()
+		var err error
+		st, closeStore, err = openStore(ctx, cfg, log)
+		if err != nil {
+			return err
+		}
+		defer closeStore()
 	}
-	defer closeStore()
 
 	verifier, err := auth.NewHMACVerifier(cfg.HMACSecret, cfg.Issuer, cfg.Audience)
 	if err != nil {
@@ -67,8 +85,14 @@ func run() error {
 
 	// The sample ships only the in-memory SSP; a real adapter for a given ad
 	// server implements adapter.SSP and is selected here.
-	ssp := adapter.NewMock()
-	svc := service.New(st, ssp, service.Config{Log: log, Metrics: m})
+	ssp := o.ssp
+	if ssp == nil {
+		ssp = adapter.NewMock()
+	}
+	svc := service.New(st, ssp, service.Config{
+		Log: log, Metrics: m,
+		ApplyTimeout: cfg.ApplyTimeout, RecordTimeout: cfg.RecordTimeout, ApplyLease: cfg.ApplyLease,
+	})
 
 	queue := events.NewMemQueue(1024, 5, log)
 	queue.Subscribe(domain.TopicRuleChanged, svc.HandleRuleChanged)
@@ -77,10 +101,17 @@ func run() error {
 		Interval: cfg.OutboxInterval, Log: log, Metrics: m,
 	}
 
+	ln := o.listener
+	if ln == nil {
+		var lc net.ListenConfig
+		if ln, err = lc.Listen(ctx, "tcp", cfg.ListenAddr); err != nil {
+			return err
+		}
+	}
+
 	ready := &atomic.Bool{}
 	ready.Store(true)
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           httpapi.NewHandler(httpapi.Deps{Service: svc, Verifier: verifier, Log: log, Metrics: m, Ready: ready}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -97,8 +128,8 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr, "store", cfg.StoreBackend)
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		log.Info("listening", "addr", ln.Addr().String(), "store", cfg.StoreBackend)
+		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
 		close(serveErr)
@@ -114,15 +145,27 @@ func run() error {
 
 	// Graceful shutdown: fail readiness first so the Service drops this pod
 	// from its endpoints, wait for that to propagate, then stop accepting and
-	// let in-flight requests (including applies) finish.
+	// let in-flight requests finish.
 	log.Info("shutdown: draining", "drain", cfg.ShutdownDrain)
 	ready.Store(false)
 	time.Sleep(cfg.ShutdownDrain)
 
+	// Applies are waited for separately and for longer than ordinary
+	// requests: an apply runs detached from its request, so srv.Shutdown
+	// returning (or timing out) says nothing about whether it has recorded
+	// its result. Exiting before then leaves a partial, unaudited change on
+	// the ad platform. The pod's terminationGracePeriodSeconds must cover
+	// SHUTDOWN_DRAIN + APPLY_TIMEOUT + RECORD_TIMEOUT + margin.
+	shutdownStart := time.Now()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownWait)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown: http server", "err", err)
+		log.Warn("shutdown: http server did not finish in SHUTDOWN_WAIT", "err", err)
+	}
+	applyCtx, cancelApply := context.WithDeadline(context.Background(), shutdownStart.Add(svc.MaxApplyDuration()+2*time.Second))
+	defer cancelApply()
+	if err := svc.WaitForApplies(applyCtx); err != nil {
+		log.Error("shutdown: in-flight apply did not finish; its lease will expire and a later request can reclaim it", "err", err)
 	}
 	stopBackground()
 	bg.Wait()

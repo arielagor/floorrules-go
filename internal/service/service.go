@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/arielagor/floorrules-go/internal/adapter"
@@ -32,6 +33,7 @@ var (
 	ErrIdempotencyKeyReused  = errors.New("idempotency key was already used for a different request")
 	ErrInvalidIdempotencyKey = errors.New("Idempotency-Key header must be 8-128 chars of [A-Za-z0-9._:-]")
 	ErrPlatformUnavailable   = errors.New("ad platform unavailable")
+	ErrShuttingDown          = errors.New("instance is shutting down; retry the request")
 )
 
 // AutoPlannerConsumer names the rule.changed consumer for dedupe records.
@@ -57,6 +59,12 @@ type Service struct {
 	store store.Store
 	ssp   adapter.SSP
 	cfg   Config
+
+	// Shutdown bookkeeping. Once draining is set no new apply starts, so
+	// inflight.Add never races inflight.Wait.
+	mu       sync.Mutex
+	draining bool
+	inflight sync.WaitGroup
 }
 
 // New builds a Service, filling unset config with defaults.
@@ -87,6 +95,44 @@ func New(st store.Store, ssp adapter.SSP, cfg Config) *Service {
 
 // Ready reports whether dependencies are reachable.
 func (s *Service) Ready(ctx context.Context) error { return s.store.Ping(ctx) }
+
+// MaxApplyDuration is the longest one apply can take from claim to recorded
+// result: the execution budget plus the separate recording budget. Shutdown
+// must allow at least this long, or a deploy can cut an apply off midway.
+func (s *Service) MaxApplyDuration() time.Duration {
+	return s.cfg.ApplyTimeout + s.cfg.RecordTimeout
+}
+
+// WaitForApplies stops new applies (they get ErrShuttingDown) and blocks
+// until every apply already started has recorded its result, or ctx ends.
+func (s *Service) WaitForApplies(ctx context.Context) error {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		s.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// enterApply registers an apply with the shutdown tracker. It reports false
+// once shutdown has begun.
+func (s *Service) enterApply() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.draining {
+		return false
+	}
+	s.inflight.Add(1)
+	return true
+}
 
 // CreateRule validates and stores a rule.
 func (s *Service) CreateRule(ctx context.Context, actor string, r domain.Rule) (domain.Rule, error) {
@@ -179,6 +225,10 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	if !idemKeyRe.MatchString(key) {
 		return domain.ApplyResult{}, false, ErrInvalidIdempotencyKey
 	}
+	if !s.enterApply() {
+		return domain.ApplyResult{}, false, ErrShuttingDown
+	}
+	defer s.inflight.Done()
 	hash := requestHash(planID, ackRisky)
 	leaseCutoff := s.cfg.Now().Add(-s.cfg.ApplyLease)
 

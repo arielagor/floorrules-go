@@ -54,4 +54,11 @@ func TestRegistry_GaugeIsSetNotAdded(t *testing.T) {
 func TestRegistry_NilIsNoop(t *testing.T) {
 	var r *Registry
 	r.Inc("x") // must not panic
+	r.Set("g", 1)
+	// Day-2 review nit: Get (and Describe) were not nil-safe while the
+	// package documents a nil registry as a no-op.
+	r.Describe("x", "help")
+	if got := r.Get("x"); got != 0 {
+		t.Fatalf("nil Get = %v, want 0", got)
+	}
 }

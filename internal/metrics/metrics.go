@@ -43,8 +43,11 @@ func (r *Registry) Set(name string, v float64, labels ...string) {
 	m[key] = v
 }
 
-// Describe sets the HELP text for a counter.
+// Describe sets the HELP text for a counter. A nil registry is a no-op.
 func (r *Registry) Describe(name, help string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.help[name] = help
@@ -73,8 +76,11 @@ func (r *Registry) Add(name string, v float64, labels ...string) {
 	m[key] += v
 }
 
-// Get returns a counter's current value (for tests).
+// Get returns a counter's current value (for tests). A nil registry reads 0.
 func (r *Registry) Get(name string, labels ...string) float64 {
+	if r == nil {
+		return 0
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.counters[name][renderLabels(labels)]

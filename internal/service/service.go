@@ -31,7 +31,7 @@ var (
 	ErrRiskyNotAcknowledged  = errors.New("plan contains risky ops; resend with acknowledge_risky=true after review")
 	ErrApplyInProgress       = errors.New("an apply for this plan or key is already in progress")
 	ErrIdempotencyKeyReused  = errors.New("idempotency key was already used for a different request")
-	ErrInvalidIdempotencyKey = errors.New("Idempotency-Key header must be 8-128 chars of [A-Za-z0-9._:-]")
+	ErrInvalidIdempotencyKey = errors.New("the Idempotency-Key header must be 8-128 chars of [A-Za-z0-9._:-]")
 	ErrPlatformUnavailable   = errors.New("ad platform unavailable")
 	ErrShuttingDown          = errors.New("instance is shutting down; retry the request")
 	// ErrLeaseLost: this worker stalled past its lease and another took the
@@ -78,7 +78,10 @@ type Service struct {
 // that is still running, and both would write to the platform.
 func New(st store.Store, ssp adapter.SSP, cfg Config) (*Service, error) {
 	if cfg.Limits.MaxOps == 0 {
-		cfg.Limits = domain.DefaultLimits
+		cfg.Limits.MaxOps = domain.DefaultLimits.MaxOps
+	}
+	if cfg.Limits.RiskyChangePct == 0 {
+		cfg.Limits.RiskyChangePct = domain.DefaultLimits.RiskyChangePct
 	}
 	if cfg.Retry.MaxAttempts == 0 {
 		cfg.Retry = adapter.DefaultRetryPolicy()
@@ -390,6 +393,9 @@ func (s *Service) execute(ctx context.Context, plan domain.Plan, followsInterrup
 		r := domain.OpResult{Op: op, Attempts: attempts, Outcome: domain.OutcomeApplied}
 		if err != nil {
 			r.Outcome, r.Error, failed = domain.OutcomeFailed, err.Error(), true
+			if se, ok := errors.AsType[*adapter.StatusError](err); ok {
+				r.PlatformStatus = se.Status
+			}
 		} else {
 			applied++
 		}

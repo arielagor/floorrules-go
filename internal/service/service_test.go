@@ -52,6 +52,33 @@ func TestNew_RejectsLeaseShorterThanAnApply(t *testing.T) {
 	}
 }
 
+// Day-2 review nit: New replaced all of Limits when MaxOps was zero, which
+// silently dropped a caller's RiskyChangePct.
+func TestNew_FillsLimitsFieldByField(t *testing.T) {
+	svc := mustNew(t, memstore.New(), adapter.NewMock(), Config{Limits: domain.PlanLimits{RiskyChangePct: 10}})
+	if got := svc.cfg.Limits; got.RiskyChangePct != 10 || got.MaxOps != domain.DefaultLimits.MaxOps {
+		t.Fatalf("limits = %+v, want RiskyChangePct 10 and the default MaxOps", got)
+	}
+	svc = mustNew(t, memstore.New(), adapter.NewMock(), Config{Limits: domain.PlanLimits{MaxOps: 7}})
+	if got := svc.cfg.Limits; got.MaxOps != 7 || got.RiskyChangePct != domain.DefaultLimits.RiskyChangePct {
+		t.Fatalf("limits = %+v, want MaxOps 7 and the default RiskyChangePct", got)
+	}
+}
+
+// Day-2 review nit (ST1005): error strings start lower-case so they read
+// correctly when wrapped. staticcheck skips a first word with an inner
+// capital ("Idempotency-Key"), so this one got past the linter.
+func TestErrorStringsStartLowerCase(t *testing.T) {
+	for _, err := range []error{
+		ErrRiskyNotAcknowledged, ErrApplyInProgress, ErrIdempotencyKeyReused, ErrInvalidIdempotencyKey,
+		ErrPlatformUnavailable, ErrShuttingDown, ErrAttemptAbandoned,
+	} {
+		if s := err.Error(); s == "" || strings.ToLower(s[:1]) != s[:1] {
+			t.Errorf("error string %q starts with a capital", s)
+		}
+	}
+}
+
 func seg(device, geo string) domain.Segment {
 	return domain.Segment{Device: device, Geo: geo, Genre: domain.Any, DemandPartner: domain.Any}
 }

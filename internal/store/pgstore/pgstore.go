@@ -73,8 +73,11 @@ func scanRule(row pgx.Row) (domain.Rule, error) {
 	err := row.Scan(&r.ID, &r.PublisherID, &r.Segment.Device, &r.Segment.Geo, &r.Segment.Genre,
 		&r.Segment.DemandPartner, &r.FloorMicros, &r.Currency, &status, &r.Version, &r.CreatedBy,
 		&r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return domain.Rule{}, err
+	}
 	r.Status = domain.RuleStatus(status)
-	return r, err
+	return r, nil
 }
 
 // CreateRule implements store.Store.

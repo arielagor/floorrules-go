@@ -21,6 +21,23 @@ type OpResult struct {
 	Outcome  OpOutcome `json:"outcome"`
 	Attempts int       `json:"attempts"`
 	Error    string    `json:"error,omitempty"`
+	// PlatformStatus is the platform's HTTP status for a failed op, when it
+	// answered with one. The API uses it to tell "the platform refused this
+	// change" (4xx) from "the platform is failing" (5xx, timeouts).
+	PlatformStatus int `json:"platform_status,omitempty"`
+}
+
+// RejectedByPlatform reports whether the op that stopped this apply failed
+// because the platform refused the request (a 4xx other than 429), as
+// opposed to the platform being unavailable. Retrying the same plan cannot
+// succeed in the first case.
+func (r ApplyResult) RejectedByPlatform() bool {
+	for _, o := range r.Results {
+		if o.Outcome == OutcomeFailed {
+			return o.PlatformStatus >= 400 && o.PlatformStatus < 500 && o.PlatformStatus != 429
+		}
+	}
+	return false
 }
 
 // ApplyResult is what an apply returns, and what a replay of the same

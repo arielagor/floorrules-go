@@ -309,24 +309,40 @@ func TestApplyStatusCodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Permanent SSP failure -> 502, and the replay returns the same 502.
+	// The platform rejected the change (4xx) -> 422, and the replay returns
+	// the same 422. Day-2 review nit: this was a 502, which tells the client
+	// the platform is broken and a retry might help; a 4xx means the request
+	// itself was refused and the same plan will be refused again.
 	failing := mk()
 	e.ssp.FailNext("SetFloor", &adapter.StatusError{Status: 400})
 	path := "/v1/publishers/acme-tv/plans/" + failing + "/apply"
 	h := map[string]string{"Idempotency-Key": "fail-key-00001"}
 	resp, body = e.do(t, call{method: "POST", path: path, tok: tok, headers: h})
-	if resp.StatusCode != 502 || body["status"] != "failed" {
-		t.Fatalf("failed apply = %d %v", resp.StatusCode, body)
+	if resp.StatusCode != 422 || body["status"] != "failed" {
+		t.Fatalf("platform-rejected apply = %d %v", resp.StatusCode, body)
 	}
 	resp, _ = e.do(t, call{method: "POST", path: path, tok: tok, headers: h})
-	if resp.StatusCode != 502 || resp.Header.Get("Idempotent-Replayed") != "true" {
+	if resp.StatusCode != 422 || resp.Header.Get("Idempotent-Replayed") != "true" {
 		t.Fatalf("replayed failure = %d", resp.StatusCode)
 	}
 
-	// Same key, different body -> 422.
+	// Same key, different body -> 422 with its own error code.
 	resp, body = e.do(t, call{method: "POST", path: path, tok: tok, headers: h, body: `{"acknowledge_risky":true}`})
-	if resp.StatusCode != 422 {
+	if resp.StatusCode != 422 || errCode(body) == "" {
 		t.Fatalf("key reuse = %d %v", resp.StatusCode, body)
+	}
+
+	// The platform kept failing (5xx after every retry) -> 502.
+	broken := mk()
+	down := make([]error, 10)
+	for i := range down {
+		down[i] = &adapter.StatusError{Status: 503}
+	}
+	e.ssp.FailNext("SetFloor", down...)
+	resp, body = e.do(t, call{method: "POST", path: "/v1/publishers/acme-tv/plans/" + broken + "/apply", tok: tok,
+		headers: map[string]string{"Idempotency-Key": "down-key-00001"}})
+	if resp.StatusCode != 502 || body["status"] != "failed" {
+		t.Fatalf("platform-down apply = %d %v", resp.StatusCode, body)
 	}
 
 	// Platform down while planning -> 503 with Retry-After.
@@ -472,6 +488,33 @@ func TestPanicStillCountsAndLogs(t *testing.T) {
 	}
 	if !panicLine {
 		t.Errorf("panic log line has no request id; logs:\n%s", logs.String())
+	}
+}
+
+// Day-2 review nit: RFC 7235 auth schemes are case-insensitive, so
+// "bearer" and "BEARER" are the same scheme as "Bearer".
+func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
+	e := newEnv(t, nil)
+	tok := token(t, allScopes, "acme-tv")
+	for _, scheme := range []string{"Bearer", "bearer", "BEARER"} {
+		req, err := http.NewRequest("GET", e.srv.URL+"/v1/publishers/acme-tv/rules", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", scheme+" "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("scheme %q: status %d, want 200", scheme, resp.StatusCode)
+		}
+	}
+	// A different scheme is still refused.
+	resp, _ := e.do(t, call{method: "GET", path: "/v1/publishers/acme-tv/rules", headers: map[string]string{"Authorization": "Basic " + tok}})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Basic scheme: status %d, want 401", resp.StatusCode)
 	}
 }
 

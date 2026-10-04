@@ -159,8 +159,9 @@ type authedHandler func(w http.ResponseWriter, r *http.Request, p auth.Principal
 // well-formed publisher ID, and that the token is granted that publisher.
 func (s *server) authed(scope string, h authedHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok {
+		// The auth scheme is case-insensitive (RFC 7235 section 2.1).
+		scheme, raw, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="floorrules"`)
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "missing bearer token", nil)
 			return
@@ -310,7 +311,12 @@ func (s *server) applyPlan(w http.ResponseWriter, r *http.Request, p auth.Princi
 	case domain.PlanStale:
 		code = http.StatusConflict
 	case domain.PlanFailed, domain.PlanPartiallyApplied:
+		// 422 when the platform refused the change (retrying the same plan
+		// is pointless), 502 when the platform itself was failing.
 		code = http.StatusBadGateway
+		if res.RejectedByPlatform() {
+			code = http.StatusUnprocessableEntity
+		}
 	}
 	writeJSON(w, code, res)
 }

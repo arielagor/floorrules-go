@@ -70,6 +70,52 @@ func TestPodsHaveNoMetadataServerEgress(t *testing.T) {
 	}
 }
 
+// The alert rules must name metrics the binary really exports: registered
+// with a HELP line in main.go and emitted by Inc/Add/Set somewhere in the
+// code. A renamed metric otherwise turns an alert into one that can never
+// fire, and nothing else would notice.
+func TestAlertRulesUseExportedMetrics(t *testing.T) {
+	rules := readRepoFile(t, "deploy/k8s/prometheus-rules.yaml")
+	mainGo := readRepoFile(t, "cmd/floorsvc/main.go")
+	var code strings.Builder
+	for _, dir := range []string{"internal/service", "internal/events", "internal/httpapi"} {
+		entries, err := os.ReadDir("../../" + dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+				code.WriteString(readRepoFile(t, dir+"/"+e.Name()))
+			}
+		}
+	}
+	exprs := regexp.MustCompile(`(?s)expr:\s*(\|\n.*?\n\s+for:|[^\n]+)`).FindAllStringSubmatch(rules, -1)
+	if len(exprs) == 0 {
+		t.Fatal("no alert expressions found")
+	}
+	names := map[string]bool{}
+	for _, e := range exprs {
+		for _, m := range regexp.MustCompile(`\b([a-z][a-z0-9_]*)\s*[{\[)]`).FindAllStringSubmatch(e[1], -1) {
+			switch m[1] {
+			case "sum", "max", "rate", "increase", "and", "for":
+				continue
+			}
+			names[m[1]] = true
+		}
+	}
+	if len(names) < 4 {
+		t.Fatalf("expected at least 4 metric names in the rules, found %v", names)
+	}
+	for n := range names {
+		if !strings.Contains(mainGo, `m.Describe("`+n+`"`) {
+			t.Errorf("alert uses %s, which main.go does not register", n)
+		}
+		if !regexp.MustCompile(`\.(Inc|Add|Set)\("` + regexp.QuoteMeta(n) + `"`).MatchString(code.String()) {
+			t.Errorf("alert uses %s, which no code emits", n)
+		}
+	}
+}
+
 // The Deployment's grace period must cover the whole shutdown sequence in
 // run(): readiness drain, then the longest possible apply (execution plus
 // recording). Kubernetes sends SIGKILL when it runs out, which is exactly

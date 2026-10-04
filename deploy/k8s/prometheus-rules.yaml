@@ -1,0 +1,71 @@
+# Alerting rules for Google Cloud Managed Service for Prometheus. A Rules
+# resource is namespace-scoped: GMP's rule evaluator runs these queries
+# against series from the floorrules namespace only. Alerts reach a human
+# only once an Alertmanager receiver is configured for GMP; that is not part
+# of this sample. Every metric named here is registered in
+# cmd/floorsvc/main.go (TestAlertRulesUseExportedMetrics pins it).
+# What to do when one fires: RUNBOOK.md.
+apiVersion: monitoring.googleapis.com/v1
+kind: Rules
+metadata:
+  name: floorsvc-alerts
+  namespace: floorrules
+  labels:
+    app.kubernetes.io/name: floorsvc
+spec:
+  groups:
+    - name: floorsvc-apply
+      interval: 60s
+      rules:
+        # More than 20% of applies over 15 minutes ended failed or partially
+        # applied, with at least 5 applies so one bad request cannot page.
+        # apply_total{status} is counted once per recorded apply; stale is
+        # excluded (it means someone else changed the platform, not that we
+        # failed).
+        - alert: FloorsvcApplyFailureRate
+          expr: |
+            (
+              sum(rate(apply_total{status=~"failed|partially_applied"}[15m]))
+              /
+              sum(rate(apply_total[15m]))
+            ) > 0.2
+            and
+            sum(increase(apply_total[15m])) >= 5
+          for: 10m
+          labels:
+            severity: page
+          annotations:
+            summary: "More than 20% of floor applies are failing"
+            runbook: "RUNBOOK.md#apply-failures"
+        # An apply changed the platform but its result could not be written.
+        # Rare and always worth a look: the audit log is missing a row.
+        - alert: FloorsvcApplyNotRecorded
+          expr: sum(increase(apply_record_failures_total[10m])) > 0
+          labels:
+            severity: page
+          annotations:
+            summary: "An apply finished but its result was not recorded"
+            runbook: "RUNBOOK.md#apply-failures"
+    - name: floorsvc-outbox
+      interval: 60s
+      rules:
+        # The oldest undelivered event is over 10 minutes old. Retries back
+        # off 1s, 2s, 4s ... up to 5m, so one event retrying normally stays
+        # under this; a stuck relay or a consumer failing every time does
+        # not. Every replica reports the same database-wide gauge, so max().
+        - alert: FloorsvcOutboxLag
+          expr: max(outbox_oldest_pending_seconds) > 600
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "Outbox events are not being delivered (oldest is {{ $value | humanizeDuration }} old)"
+            runbook: "RUNBOOK.md#outbox-lag"
+        - alert: FloorsvcOutboxDeadLetters
+          expr: max(outbox_dead_letters) > 0
+          for: 5m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "{{ $value }} outbox events were dead-lettered and need an operator"
+            runbook: "RUNBOOK.md#outbox-lag"

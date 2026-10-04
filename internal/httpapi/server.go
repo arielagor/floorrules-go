@@ -163,6 +163,9 @@ func (s *server) authed(scope string, h authedHandler) http.Handler {
 		}
 		p, err := s.Verifier.Verify(r.Context(), strings.TrimSpace(raw))
 		if err != nil {
+			// The reason goes to the log only; the client gets one generic 401
+			// so it cannot probe which check failed.
+			s.Log.Warn("token rejected", "request_id", requestIDFrom(r.Context()), "reason", err.Error())
 			w.Header().Set("WWW-Authenticate", `Bearer realm="floorrules", error="invalid_token"`)
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "invalid token", nil)
 			return

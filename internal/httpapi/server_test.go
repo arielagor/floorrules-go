@@ -405,3 +405,36 @@ func TestRequestIDAndRecover(t *testing.T) {
 		t.Fatalf("panic not recovered to 500: %d", rec.Code)
 	}
 }
+
+// L5 (day-2 review): the auth package promised the specific reason for a
+// rejected token "is logged server-side only", but nothing logged it.
+func TestRejectedTokenReasonIsLoggedNotReturned(t *testing.T) {
+	e := newEnv(t, nil)
+	expired, err := auth.SignHS256(key, auth.Claims{
+		Subject: "user:ops-1", Issuer: issuer, Audience: auth.Audience{audience},
+		ExpiresAt: time.Now().Add(-time.Hour).Unix(), Scope: allScopes, Publishers: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, body := e.do(t, call{method: "GET", path: "/v1/publishers/acme-tv/rules", tok: expired,
+		headers: map[string]string{"X-Request-ID": "rid-l5"}})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if b, _ := json.Marshal(body); strings.Contains(string(b), "expired") {
+		t.Fatalf("401 body leaks the reason: %s", b)
+	}
+	var found bool
+	for line := range strings.SplitSeq(e.logs.String(), "\n") {
+		if strings.Contains(line, `"rid-l5"`) && strings.Contains(line, "expired") {
+			found = true
+			if strings.Contains(line, expired) {
+				t.Fatalf("log line contains the token: %s", line)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no log line with the request id and the reason; logs:\n%s", e.logs.String())
+	}
+}

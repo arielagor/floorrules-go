@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -32,9 +33,13 @@ const (
 // AllPublishers is the publisher grant that covers every publisher.
 const AllPublishers = "*"
 
-// ErrUnauthenticated covers every token failure. Callers get one generic
-// 401; the specific reason is logged server-side only.
+// ErrUnauthenticated covers every token failure. Verify wraps it with a
+// fixed reason ("expired", "signature mismatch", ...) for the server log;
+// callers match it with errors.Is and send the client one generic 401. A
+// reason never contains the token or any value read from it.
 var ErrUnauthenticated = errors.New("unauthenticated")
+
+func reject(reason string) error { return fmt.Errorf("%w: %s", ErrUnauthenticated, reason) }
 
 // Principal is the verified caller.
 type Principal struct {
@@ -123,51 +128,51 @@ const maxTokenBytes = 4096
 // Verify implements Verifier.
 func (v *HMACVerifier) Verify(_ context.Context, token string) (Principal, error) {
 	if token == "" || len(token) > maxTokenBytes {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("empty or oversized token")
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("malformed token")
 	}
 
 	var h header
 	if err := decodeSegment(parts[0], &h); err != nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("malformed header")
 	}
 	// Pin the algorithm. Never let the token choose it: that is how "none"
 	// and RS/HS confusion attacks work.
 	if h.Alg != "HS256" {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("unsupported alg")
 	}
 
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("signature not base64url")
 	}
 	mac := hmac.New(sha256.New, v.key)
 	mac.Write([]byte(parts[0] + "." + parts[1]))
 	if !hmac.Equal(sig, mac.Sum(nil)) { // constant-time compare
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("signature mismatch")
 	}
 
 	var c Claims
 	if err := decodeSegment(parts[1], &c); err != nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("malformed claims")
 	}
 	now := v.now()
 	switch {
 	case c.Subject == "":
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("missing subject")
 	case c.Issuer != v.issuer:
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("wrong issuer")
 	case !slices.Contains(c.Audience, v.audience):
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("wrong audience")
 	case c.ExpiresAt == 0: // exp is mandatory; no immortal tokens
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("missing exp")
 	case now.After(time.Unix(c.ExpiresAt, 0).Add(v.leeway)):
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("expired")
 	case c.NotBefore != 0 && now.Add(v.leeway).Before(time.Unix(c.NotBefore, 0)):
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, reject("not yet valid")
 	}
 	return Principal{Subject: c.Subject, Scopes: strings.Fields(c.Scope), Publishers: c.Publishers}, nil
 }

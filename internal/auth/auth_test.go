@@ -92,29 +92,42 @@ func TestVerify_Rejects(t *testing.T) {
 	}
 	otherKey, _ := SignHS256([]byte("ffffffffffffffffffffffffffffffff"), claims(now))
 
-	cases := map[string]string{
-		"empty":            "",
-		"garbage":          "not-a-jwt",
-		"two parts":        parts[0] + "." + parts[1],
-		"alg none":         noneHeader + "." + parts[1] + ".",
-		"alg none signed":  resign(noneHeader + "." + parts[1]),
-		"alg HS512":        resign(hs512Header + "." + parts[1]),
-		"wrong key":        otherKey,
-		"tampered body":    parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"admin","scope":"plans:apply","pubs":["*"]}`)) + "." + parts[2],
-		"bad sig encoding": parts[0] + "." + parts[1] + ".%%%",
-		"expired":          mut(func(c *Claims) { c.ExpiresAt = now.Add(-time.Minute).Unix() }),
-		"no exp":           mut(func(c *Claims) { c.ExpiresAt = 0 }),
-		"not yet valid":    mut(func(c *Claims) { c.NotBefore = now.Add(time.Hour).Unix() }),
-		"wrong issuer":     mut(func(c *Claims) { c.Issuer = "https://evil.test" }),
-		"wrong audience":   mut(func(c *Claims) { c.Audience = Audience{"other-service"} }),
-		"no subject":       mut(func(c *Claims) { c.Subject = "" }),
-		"oversized":        strings.Repeat("a", maxTokenBytes+1),
+	// Each case names the reason the error must carry. L5 (day-2 review):
+	// every branch returned the bare sentinel, so the "logged server-side"
+	// reason did not exist and an operator could not tell an expired token
+	// from a forged one.
+	type tc struct{ tok, reason string }
+	cases := map[string]tc{
+		"empty":            {"", "empty or oversized"},
+		"garbage":          {"not-a-jwt", "malformed"},
+		"two parts":        {parts[0] + "." + parts[1], "malformed"},
+		"alg none":         {noneHeader + "." + parts[1] + ".", "alg"},
+		"alg none signed":  {resign(noneHeader + "." + parts[1]), "alg"},
+		"alg HS512":        {resign(hs512Header + "." + parts[1]), "alg"},
+		"wrong key":        {otherKey, "signature"},
+		"tampered body":    {parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"admin","scope":"plans:apply","pubs":["*"]}`)) + "." + parts[2], "signature"},
+		"bad sig encoding": {parts[0] + "." + parts[1] + ".%%%", "signature"},
+		"expired":          {mut(func(c *Claims) { c.ExpiresAt = now.Add(-time.Minute).Unix() }), "expired"},
+		"no exp":           {mut(func(c *Claims) { c.ExpiresAt = 0 }), "exp"},
+		"not yet valid":    {mut(func(c *Claims) { c.NotBefore = now.Add(time.Hour).Unix() }), "not yet valid"},
+		"wrong issuer":     {mut(func(c *Claims) { c.Issuer = "https://evil.test" }), "issuer"},
+		"wrong audience":   {mut(func(c *Claims) { c.Audience = Audience{"other-service"} }), "audience"},
+		"no subject":       {mut(func(c *Claims) { c.Subject = "" }), "subject"},
+		"oversized":        {strings.Repeat("a", maxTokenBytes+1), "empty or oversized"},
 	}
 	v := verifier(t, now)
-	for name, tok := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrUnauthenticated) {
+			_, err := v.Verify(context.Background(), c.tok)
+			if !errors.Is(err, ErrUnauthenticated) {
 				t.Fatalf("want ErrUnauthenticated, got %v", err)
+			}
+			if !strings.Contains(err.Error(), c.reason) {
+				t.Fatalf("error %q does not name the reason %q", err, c.reason)
+			}
+			// The token itself must never end up in the error (it is logged).
+			if c.tok != "" && len(c.tok) > 16 && strings.Contains(err.Error(), c.tok) {
+				t.Fatalf("error echoes the token: %q", err)
 			}
 		})
 	}

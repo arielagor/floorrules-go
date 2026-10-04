@@ -185,15 +185,15 @@ func (s *Store) GetPlan(ctx context.Context, publisherID, planID string) (domain
 	return p, nil
 }
 
-const attemptColumns = `idempotency_key, plan_id::text, request_hash, status, actor, result, started_at, finished_at,
-	attempt_token::text`
+const attemptColumns = `publisher_id, idempotency_key, plan_id::text, request_hash, status, actor, result,
+	started_at, finished_at, attempt_token::text`
 
 func scanAttempt(row pgx.Row) (domain.ApplyAttempt, error) {
 	var a domain.ApplyAttempt
 	var status string
 	var result []byte
-	err := row.Scan(&a.IdempotencyKey, &a.PlanID, &a.RequestHash, &status, &a.Actor, &result, &a.StartedAt, &a.FinishedAt,
-		&a.Token)
+	err := row.Scan(&a.PublisherID, &a.IdempotencyKey, &a.PlanID, &a.RequestHash, &status, &a.Actor, &result,
+		&a.StartedAt, &a.FinishedAt, &a.Token)
 	if err != nil {
 		return a, err
 	}
@@ -208,9 +208,9 @@ func scanAttempt(row pgx.Row) (domain.ApplyAttempt, error) {
 }
 
 // GetAttempt implements store.Store.
-func (s *Store) GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error) {
+func (s *Store) GetAttempt(ctx context.Context, publisherID, key string) (domain.ApplyAttempt, error) {
 	a, err := scanAttempt(s.pool.QueryRow(ctx, `SELECT `+attemptColumns+`
-		FROM apply_attempts WHERE idempotency_key = $1`, key))
+		FROM apply_attempts WHERE publisher_id = $1 AND idempotency_key = $2`, publisherID, key))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ApplyAttempt{}, store.ErrNotFound
 	}
@@ -228,7 +228,8 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 		// this transaction, a second key could pass the check, wait while
 		// the first key finished, and then claim an applied plan.
 		var planStatus string
-		err := tx.QueryRow(ctx, `SELECT status FROM plans WHERE id = $1 FOR UPDATE`, a.PlanID).Scan(&planStatus)
+		err := tx.QueryRow(ctx, `SELECT status FROM plans WHERE id = $1 AND publisher_id = $2 FOR UPDATE`,
+			a.PlanID, a.PublisherID).Scan(&planStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return store.ErrNotFound
 		}
@@ -236,22 +237,23 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 			return err
 		}
 
-		selectKey := `SELECT ` + attemptColumns + ` FROM apply_attempts WHERE idempotency_key = $1 FOR UPDATE`
-		out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.IdempotencyKey))
+		selectKey := `SELECT ` + attemptColumns + ` FROM apply_attempts
+			WHERE publisher_id = $1 AND idempotency_key = $2 FOR UPDATE`
+		out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.PublisherID, a.IdempotencyKey))
 		if errors.Is(err, pgx.ErrNoRows) {
 			// A new key: claim it only while the plan is pending.
 			if domain.PlanStatus(planStatus) != domain.PlanPending {
 				return store.ErrPlanNotPending
 			}
 			out, err = scanAttempt(tx.QueryRow(ctx, `INSERT INTO apply_attempts
-				(idempotency_key, plan_id, request_hash, status, actor, attempt_token)
-				VALUES ($1, $2, $3, 'in_progress', $4, gen_random_uuid())
-				ON CONFLICT (idempotency_key) DO NOTHING
-				RETURNING `+attemptColumns, a.IdempotencyKey, a.PlanID, a.RequestHash, a.Actor))
+				(publisher_id, idempotency_key, plan_id, request_hash, status, actor, attempt_token)
+				VALUES ($1, $2, $3, $4, 'in_progress', $5, gen_random_uuid())
+				ON CONFLICT (publisher_id, idempotency_key) DO NOTHING
+				RETURNING `+attemptColumns, a.PublisherID, a.IdempotencyKey, a.PlanID, a.RequestHash, a.Actor))
 			if errors.Is(err, pgx.ErrNoRows) {
-				// A concurrent claim on another plan took the key first;
-				// answer from its record.
-				out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.IdempotencyKey))
+				// A concurrent claim on another of this publisher's plans
+				// took the key first; answer from its record.
+				out, err = scanAttempt(tx.QueryRow(ctx, selectKey, a.PublisherID, a.IdempotencyKey))
 				return err
 			}
 			created = err == nil
@@ -267,9 +269,10 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 		// Reclaim only if the lease has expired. A new token fences off the
 		// previous holder, should it still be running.
 		reclaimed, err := scanAttempt(tx.QueryRow(ctx, `UPDATE apply_attempts
-			SET started_at = now(), actor = $2, attempt_token = gen_random_uuid()
-			WHERE idempotency_key = $1 AND started_at < now() - ($3::bigint * interval '1 millisecond')
-			RETURNING `+attemptColumns, a.IdempotencyKey, a.Actor, lease.Milliseconds()))
+			SET started_at = now(), actor = $3, attempt_token = gen_random_uuid()
+			WHERE publisher_id = $1 AND idempotency_key = $2
+			  AND started_at < now() - ($4::bigint * interval '1 millisecond')
+			RETURNING `+attemptColumns, a.PublisherID, a.IdempotencyKey, a.Actor, lease.Milliseconds()))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // lease still live: the holder is presumed to be running
 		}
@@ -292,7 +295,8 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 }
 
 // FinishApply implements store.Store.
-func (s *Store) FinishApply(ctx context.Context, publisherID string, a domain.ApplyAttempt, result domain.ApplyResult) error {
+func (s *Store) FinishApply(ctx context.Context, a domain.ApplyAttempt, result domain.ApplyResult) error {
+	publisherID := a.PublisherID
 	status := domain.AttemptFailed
 	if result.Status == domain.PlanApplied {
 		status = domain.AttemptSucceeded
@@ -303,13 +307,13 @@ func (s *Store) FinishApply(ctx context.Context, publisherID string, a domain.Ap
 	}
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var planID string
-		err := tx.QueryRow(ctx, `UPDATE apply_attempts SET status = $3, result = $4, finished_at = now()
-			WHERE idempotency_key = $1 AND attempt_token::text = $2 AND status = 'in_progress'
-			RETURNING plan_id::text`, a.IdempotencyKey, a.Token, string(status), raw).Scan(&planID)
+		err := tx.QueryRow(ctx, `UPDATE apply_attempts SET status = $4, result = $5, finished_at = now()
+			WHERE publisher_id = $1 AND idempotency_key = $2 AND attempt_token::text = $3 AND status = 'in_progress'
+			RETURNING plan_id::text`, publisherID, a.IdempotencyKey, a.Token, string(status), raw).Scan(&planID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM apply_attempts WHERE idempotency_key = $1)`,
-				a.IdempotencyKey).Scan(&exists); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM apply_attempts
+				WHERE publisher_id = $1 AND idempotency_key = $2)`, publisherID, a.IdempotencyKey).Scan(&exists); err != nil {
 				return err
 			}
 			if !exists {

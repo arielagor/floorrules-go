@@ -28,6 +28,7 @@ func Run(t *testing.T, newStore Factory) {
 	t.Run("ApplyLeaseReclaim", func(t *testing.T) { testLeaseReclaim(t, newStore(t)) })
 	t.Run("ConcurrentBeginApply", func(t *testing.T) { testConcurrentBegin(t, newStore(t)) })
 	t.Run("ClaimRequiresPendingPlan", func(t *testing.T) { testClaimRequiresPending(t, newStore(t)) })
+	t.Run("IdempotencyKeysScopedToPublisher", func(t *testing.T) { testKeysScoped(t, newStore(t)) })
 	t.Run("AuditAndOutboxAtomicWithChange", func(t *testing.T) { testAuditOutbox(t, newStore(t)) })
 	t.Run("EventDedupe", func(t *testing.T) { testEventDedupe(t, newStore(t)) })
 	t.Run("OutboxRedelivery", func(t *testing.T) { testOutboxRedelivery(t, newStore(t)) })
@@ -114,7 +115,7 @@ func testPlanScoped(t *testing.T, s store.Store) {
 }
 
 func attempt(key, planID string) domain.ApplyAttempt {
-	return domain.ApplyAttempt{IdempotencyKey: key, PlanID: planID, RequestHash: "h1", Actor: "user:test"}
+	return domain.ApplyAttempt{PublisherID: "pub-a", IdempotencyKey: key, PlanID: planID, RequestHash: "h1", Actor: "user:test"}
 }
 
 func testApplyIdempotency(t *testing.T, s store.Store) {
@@ -125,7 +126,7 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	}
 	const lease = time.Hour
 
-	if _, err := s.GetAttempt(ctx, "key-1"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.GetAttempt(ctx, "pub-a", "key-1"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetAttempt before begin: want ErrNotFound, got %v", err)
 	}
 	a, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), lease)
@@ -146,17 +147,17 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	result := domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied, Results: []domain.OpResult{
 		{Op: p.Ops[0], Outcome: domain.OutcomeApplied, Attempts: 2},
 	}}
-	if err := s.FinishApply(ctx, "pub-a", a, result); err != nil {
+	if err := s.FinishApply(ctx, a, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishApply(ctx, "pub-a", a, result); !errors.Is(err, store.ErrLeaseLost) {
+	if err := s.FinishApply(ctx, a, result); !errors.Is(err, store.ErrLeaseLost) {
 		t.Fatalf("finishing a finished attempt: want ErrLeaseLost, got %v", err)
 	}
 	done, created, err := s.BeginApply(ctx, attempt("key-1", p.ID), lease)
 	if err != nil || created || done.Status != domain.AttemptSucceeded || done.Result == nil {
 		t.Fatalf("replay after finish = %+v, %v, %v", done, created, err)
 	}
-	fetched, err := s.GetAttempt(ctx, "key-1")
+	fetched, err := s.GetAttempt(ctx, "pub-a", "key-1")
 	if err != nil || fetched.Status != domain.AttemptSucceeded || fetched.FinishedAt == nil {
 		t.Fatalf("GetAttempt after finish = %+v, %v", fetched, err)
 	}
@@ -169,7 +170,7 @@ func testApplyIdempotency(t *testing.T, s store.Store) {
 	if plan.Status != domain.PlanApplied {
 		t.Fatalf("plan status = %s, want applied", plan.Status)
 	}
-	if err := s.FinishApply(ctx, "pub-a", attempt("no-such-key", p.ID), result); !errors.Is(err, store.ErrNotFound) {
+	if err := s.FinishApply(ctx, attempt("no-such-key", p.ID), result); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("finish unknown key: want ErrNotFound, got %v", err)
 	}
 }
@@ -214,7 +215,7 @@ func testLeaseReclaim(t *testing.T, s store.Store) {
 
 	// The first holder wakes up: its result is refused and changes nothing.
 	failed := domain.ApplyResult{PlanID: p.ID, Status: domain.PlanFailed}
-	if err := s.FinishApply(ctx, "pub-a", first, failed); !errors.Is(err, store.ErrLeaseLost) {
+	if err := s.FinishApply(ctx, first, failed); !errors.Is(err, store.ErrLeaseLost) {
 		t.Fatalf("stale holder's FinishApply: want ErrLeaseLost, got %v", err)
 	}
 	if got, _ := s.GetPlan(ctx, "pub-a", p.ID); got.Status != domain.PlanPending {
@@ -225,10 +226,10 @@ func testLeaseReclaim(t *testing.T, s store.Store) {
 	}
 
 	// The current holder records normally.
-	if err := s.FinishApply(ctx, "pub-a", b, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+	if err := s.FinishApply(ctx, b, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.GetAttempt(ctx, "key-1")
+	got, _ := s.GetAttempt(ctx, "pub-a", "key-1")
 	if got.Status != domain.AttemptSucceeded || got.Actor != "user:second" {
 		t.Fatalf("attempt = %+v, want succeeded by user:second", got)
 	}
@@ -286,7 +287,7 @@ func testClaimRequiresPending(t *testing.T, s store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishApply(ctx, "pub-a", a, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+	if err := s.FinishApply(ctx, a, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
 		t.Fatal(err)
 	}
 	b := attempt("key-b", p.ID)
@@ -303,6 +304,46 @@ func testClaimRequiresPending(t *testing.T, s store.Store) {
 	// The finished key still replays.
 	if done, created, err := s.BeginApply(ctx, attempt("key-a", p.ID), time.Hour); err != nil || created || done.Result == nil {
 		t.Fatalf("replay of the finished key = %+v, %v, %v", done, created, err)
+	}
+}
+
+// testKeysScoped (day-2 review M3): the same key under two publishers is two
+// attempts, and no lookup or claim crosses a publisher boundary.
+func testKeysScoped(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	pa, pb := newPlan("pub-a"), newPlan("pub-b")
+	for _, p := range []domain.Plan{pa, pb} {
+		if err := s.CreatePlan(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := attempt("shared-key", pa.ID)
+	b := attempt("shared-key", pb.ID)
+	b.PublisherID = "pub-b"
+	ca, created, err := s.BeginApply(ctx, a, time.Hour)
+	if err != nil || !created {
+		t.Fatalf("pub-a claim = %v, %v", created, err)
+	}
+	cb, created, err := s.BeginApply(ctx, b, time.Hour)
+	if err != nil || !created {
+		t.Fatalf("same key under pub-b = %v, %v; want its own attempt", created, err)
+	}
+	if err := s.FinishApply(ctx, ca, domain.ApplyResult{PlanID: pa.ID, Status: domain.PlanApplied}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetAttempt(ctx, "pub-b", "shared-key"); err != nil || got.PlanID != pb.ID || got.Status != domain.AttemptInProgress {
+		t.Fatalf("pub-b's attempt = %+v, %v; pub-a's finish leaked into it", got, err)
+	}
+	if err := s.FinishApply(ctx, cb, domain.ApplyResult{PlanID: pb.ID, Status: domain.PlanFailed}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetAttempt(ctx, "pub-c", "shared-key"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("lookup under another publisher: want ErrNotFound, got %v", err)
+	}
+	// A claim naming another publisher's plan finds nothing.
+	cross := attempt("cross-key", pb.ID)
+	if _, _, err := s.BeginApply(ctx, cross, time.Hour); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pub-a claiming pub-b's plan: want ErrNotFound, got %v", err)
 	}
 }
 
@@ -326,7 +367,7 @@ func testAuditOutbox(t *testing.T, s store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishApply(ctx, "pub-a", claim, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
+	if err := s.FinishApply(ctx, claim, domain.ApplyResult{PlanID: p.ID, Status: domain.PlanApplied}); err != nil {
 		t.Fatal(err)
 	}
 

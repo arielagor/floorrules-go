@@ -45,9 +45,12 @@ type Store interface {
 	CreatePlan(ctx context.Context, p domain.Plan) error
 	GetPlan(ctx context.Context, publisherID, planID string) (domain.Plan, error)
 
-	// GetAttempt returns the attempt stored under an idempotency key, or ErrNotFound.
-	GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error)
-	// BeginApply claims an idempotency key. If the key is new it inserts an
+	// GetAttempt returns the publisher's attempt stored under an idempotency
+	// key, or ErrNotFound. Keys are scoped to a publisher: the same key under
+	// another publisher is a different attempt.
+	GetAttempt(ctx context.Context, publisherID, key string) (domain.ApplyAttempt, error)
+	// BeginApply claims (a.PublisherID, a.IdempotencyKey) for a.PlanID, which
+	// must belong to a.PublisherID (else ErrNotFound). If the key is new it inserts an
 	// in_progress attempt and returns (attempt, true). If the key exists it
 	// returns the stored attempt and false, except that an in_progress
 	// attempt with the same request hash that started more than lease ago is
@@ -63,10 +66,10 @@ type Store interface {
 	// FinishApply records the outcome on the attempt and the plan, and writes
 	// an audit entry and a plan.applied event, atomically. It moves the plan
 	// only out of pending, never from one terminal status to another. It is fenced: it
-	// writes only if a (key, Token) is still the current in_progress claim,
+	// writes only if a's (publisher, key, Token) is still the current in_progress claim,
 	// and otherwise returns ErrLeaseLost and changes nothing. a.Actor is the
 	// audit actor. Being fenced, it is safe to retry.
-	FinishApply(ctx context.Context, publisherID string, a domain.ApplyAttempt, result domain.ApplyResult) error
+	FinishApply(ctx context.Context, a domain.ApplyAttempt, result domain.ApplyResult) error
 
 	ListAudit(ctx context.Context, publisherID string, limit int) ([]domain.AuditEntry, error)
 

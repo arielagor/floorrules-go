@@ -152,7 +152,7 @@ func TestApply_RefusedOnceShutdownBegins(t *testing.T) {
 	if h.ssp.Calls("SetFloor") != 0 {
 		t.Fatal("a refused apply touched the platform")
 	}
-	if _, err := h.st.GetAttempt(ctx, "apply-key-0001"); err == nil {
+	if _, err := h.st.GetAttempt(ctx, pub, "apply-key-0001"); err == nil {
 		t.Fatal("a refused apply consumed its idempotency key")
 	}
 }
@@ -300,10 +300,10 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 	ctx := context.Background()
 	h.rule(t, "ctv", "US", 2_000_000)
 	p := h.plan(t)
-	hash := requestHash(p.ID, false)
+	hash := requestHash(pub, p.ID, false)
 
 	// Simulate a worker that claimed the key and is still running.
-	if _, _, err := h.st.BeginApply(ctx, domain.ApplyAttempt{IdempotencyKey: "lease-key-01", PlanID: p.ID, RequestHash: hash, Actor: "user:ops"}, time.Hour); err != nil {
+	if _, _, err := h.st.BeginApply(ctx, domain.ApplyAttempt{PublisherID: pub, IdempotencyKey: "lease-key-01", PlanID: p.ID, RequestHash: hash, Actor: "user:ops"}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "lease-key-01", false); !errors.Is(err, ErrApplyInProgress) {
@@ -319,6 +319,41 @@ func TestApply_InProgressAndLeaseReclaim(t *testing.T) {
 	res, replayed, err := h.svc.ApplyPlan(ctx, "user:ops", pub, p.ID, "lease-key-01", false)
 	if err != nil || replayed || res.Status != domain.PlanApplied {
 		t.Fatalf("reclaim = %+v replayed=%v err=%v", res, replayed, err)
+	}
+}
+
+// M3 (day-2 review): idempotency keys belong to a publisher. A caller scoped
+// to publisher A must not read B's stored result by naming B's plan and key,
+// and two publishers that pick the same key must not collide.
+func TestApply_IdempotencyKeysAreTenantScoped(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	const other = "rival-tv"
+	const key = "apply-0001-shared"
+
+	// Publisher B applies its own plan with the key.
+	if _, err := h.svc.CreateRule(ctx, "user:b", domain.Rule{PublisherID: other, Segment: seg("ctv", "US"), FloorMicros: 3_000_000}); err != nil {
+		t.Fatal(err)
+	}
+	planB, err := h.svc.CreatePlan(ctx, "user:b", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, _, err := h.svc.ApplyPlan(ctx, "user:b", other, planB.ID, key, false); err != nil || res.Status != domain.PlanApplied {
+		t.Fatalf("B's apply: %+v %v", res, err)
+	}
+
+	// A caller scoped to publisher A replays B's plan and key.
+	leaked, replayed, err := h.svc.ApplyPlan(ctx, "user:a", pub, planB.ID, key, false)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-publisher replay: want ErrNotFound, got err=%v replayed=%v result=%+v", err, replayed, leaked)
+	}
+
+	// Publisher A uses the same key for its own plan: no collision.
+	h.rule(t, "ctv", "US", 2_000_000)
+	planA := h.plan(t)
+	if res, replayed, err := h.svc.ApplyPlan(ctx, "user:a", pub, planA.ID, key, false); err != nil || replayed || res.Status != domain.PlanApplied {
+		t.Errorf("same key, other publisher: %+v replayed=%v err=%v; want a fresh apply", res, replayed, err)
 	}
 }
 
@@ -448,7 +483,7 @@ func TestApply_SlowPlatformStillRecordsResult(t *testing.T) {
 	if res.Status != domain.PlanFailed {
 		t.Fatalf("status = %s, want failed", res.Status)
 	}
-	a, err := st.GetAttempt(context.Background(), "slow-ssp-key-1")
+	a, err := st.GetAttempt(context.Background(), pub, "slow-ssp-key-1")
 	if err != nil || a.Status != domain.AttemptFailed || a.Result == nil {
 		t.Fatalf("attempt = %+v, %v; want failed with a stored result", a, err)
 	}

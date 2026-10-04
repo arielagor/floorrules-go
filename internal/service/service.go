@@ -222,8 +222,11 @@ func (s *Service) CreatePlan(ctx context.Context, actor, publisherID string) (do
 
 var idemKeyRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
 
-func requestHash(planID string, ackRisky bool) string {
-	sum := sha256.Sum256([]byte(planID + "|" + strconv.FormatBool(ackRisky)))
+// requestHash identifies the request an idempotency key was first used for.
+// The publisher is part of it as well as of the key's scope, so a stored
+// result can only ever be replayed to a caller acting for that publisher.
+func requestHash(publisherID, planID string, ackRisky bool) string {
+	sum := sha256.Sum256([]byte(publisherID + "|" + planID + "|" + strconv.FormatBool(ackRisky)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -238,13 +241,14 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 		return domain.ApplyResult{}, false, ErrShuttingDown
 	}
 	defer s.inflight.Done()
-	hash := requestHash(planID, ackRisky)
+	hash := requestHash(publisherID, planID, ackRisky)
 
-	// 1. A key we have seen is answered from the record, before any state
-	// checks. An in-progress attempt for the same request goes on to
+	// 1. A key this publisher has used is answered from the record, before
+	// any state checks. Keys are looked up within the caller's publisher
+	// only. An in-progress attempt for the same request goes on to
 	// BeginApply, which decides on the database's clock whether its lease
 	// has expired and it may be reclaimed.
-	if prior, err := s.store.GetAttempt(ctx, key); err == nil {
+	if prior, err := s.store.GetAttempt(ctx, publisherID, key); err == nil {
 		if prior.Status != domain.AttemptInProgress || prior.RequestHash != hash {
 			return s.replay(prior, hash)
 		}
@@ -266,7 +270,7 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 
 	// 3. Claim the key. Losing a race to the same key falls back to replay.
 	attempt, created, err := s.store.BeginApply(ctx, domain.ApplyAttempt{
-		IdempotencyKey: key, PlanID: planID, RequestHash: hash, Actor: actor,
+		PublisherID: publisherID, IdempotencyKey: key, PlanID: planID, RequestHash: hash, Actor: actor,
 	}, s.cfg.ApplyLease)
 	if errors.Is(err, store.ErrPlanBusy) {
 		return domain.ApplyResult{}, false, ErrApplyInProgress
@@ -289,7 +293,7 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 	// audit row and event for changes that did happen.
 	recCtx, cancelRec := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.RecordTimeout)
 	defer cancelRec()
-	if err := s.record(recCtx, publisherID, attempt, result); err != nil {
+	if err := s.record(recCtx, attempt, result); err != nil {
 		if errors.Is(err, store.ErrLeaseLost) {
 			// Another worker reclaimed this attempt while we were stalled.
 			// Its record stands; ours is discarded rather than overwriting it.
@@ -311,10 +315,10 @@ func (s *Service) ApplyPlan(ctx context.Context, actor, publisherID, planID, key
 // ctx. Retrying is safe because FinishApply is fenced on the attempt token:
 // a retry after a commit whose reply was lost gets ErrLeaseLost, which is
 // told apart from a real takeover by re-reading the attempt.
-func (s *Service) record(ctx context.Context, publisherID string, a domain.ApplyAttempt, result domain.ApplyResult) error {
+func (s *Service) record(ctx context.Context, a domain.ApplyAttempt, result domain.ApplyResult) error {
 	var err error
 	for try := 1; ; try++ {
-		err = s.store.FinishApply(ctx, publisherID, a, result)
+		err = s.store.FinishApply(ctx, a, result)
 		if err == nil || errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -339,7 +343,7 @@ func (s *Service) record(ctx context.Context, publisherID string, a domain.Apply
 // recordedByUs reports whether the attempt finished under our token, i.e. an
 // earlier FinishApply committed even though its reply was lost.
 func (s *Service) recordedByUs(ctx context.Context, a domain.ApplyAttempt) bool {
-	got, err := s.store.GetAttempt(ctx, a.IdempotencyKey)
+	got, err := s.store.GetAttempt(ctx, a.PublisherID, a.IdempotencyKey)
 	return err == nil && got.Status != domain.AttemptInProgress && got.Token == a.Token
 }
 

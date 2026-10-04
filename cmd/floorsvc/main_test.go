@@ -130,7 +130,7 @@ func TestShutdownWaitsForInFlightApply(t *testing.T) {
 
 	// The moment run returns, the process would exit. The apply must
 	// already be recorded.
-	a, err := st.GetAttempt(context.Background(), key)
+	a, err := st.GetAttempt(context.Background(), "acme-tv", key)
 	if err != nil {
 		t.Fatal(err)
 	}

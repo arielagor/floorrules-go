@@ -44,6 +44,7 @@ const (
 
 // ApplyAttempt is keyed by the client's Idempotency-Key.
 type ApplyAttempt struct {
+	PublisherID    string        `json:"publisher_id"` // keys are scoped to a publisher
 	IdempotencyKey string        `json:"idempotency_key"`
 	PlanID         string        `json:"plan_id"`
 	RequestHash    string        `json:"request_hash"`

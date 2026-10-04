@@ -164,14 +164,18 @@ func (s *Store) GetPlan(ctx context.Context, publisherID, planID string) (domain
 	return p, nil
 }
 
+// attemptKey scopes an idempotency key to its publisher, like the Postgres
+// primary key (publisher_id, idempotency_key).
+func attemptKey(publisherID, key string) string { return publisherID + "\x00" + key }
+
 // GetAttempt implements store.Store.
-func (s *Store) GetAttempt(ctx context.Context, key string) (domain.ApplyAttempt, error) {
+func (s *Store) GetAttempt(ctx context.Context, publisherID, key string) (domain.ApplyAttempt, error) {
 	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
 		return domain.ApplyAttempt{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	a, ok := s.attempts[key]
+	a, ok := s.attempts[attemptKey(publisherID, key)]
 	if !ok {
 		return domain.ApplyAttempt{}, store.ErrNotFound
 	}
@@ -188,16 +192,16 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 	defer s.mu.Unlock()
 	now := s.now().UTC()
 	plan, ok := s.plans[a.PlanID]
-	if !ok {
+	if !ok || plan.PublisherID != a.PublisherID {
 		return domain.ApplyAttempt{}, false, store.ErrNotFound
 	}
-	if existing, ok := s.attempts[a.IdempotencyKey]; ok {
+	if existing, ok := s.attempts[attemptKey(a.PublisherID, a.IdempotencyKey)]; ok {
 		if existing.Status == domain.AttemptInProgress && existing.RequestHash == a.RequestHash &&
 			existing.StartedAt.Before(now.Add(-lease)) {
 			existing.StartedAt = now
 			existing.Actor = a.Actor
 			existing.Token = id.New() // fences off the previous holder
-			s.attempts[a.IdempotencyKey] = existing
+			s.attempts[attemptKey(a.PublisherID, a.IdempotencyKey)] = existing
 			return existing, true, nil
 		}
 		existing.Token = "" // only the claimant gets a usable token
@@ -216,19 +220,19 @@ func (s *Store) BeginApply(ctx context.Context, a domain.ApplyAttempt, lease tim
 	a.Result = nil
 	a.FinishedAt = nil
 	a.Token = id.New()
-	s.attempts[a.IdempotencyKey] = a
+	s.attempts[attemptKey(a.PublisherID, a.IdempotencyKey)] = a
 	return a, true, nil
 }
 
 // FinishApply implements store.Store.
-func (s *Store) FinishApply(ctx context.Context, publisherID string, claim domain.ApplyAttempt, result domain.ApplyResult) error {
+func (s *Store) FinishApply(ctx context.Context, claim domain.ApplyAttempt, result domain.ApplyResult) error {
 	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key, actor := claim.IdempotencyKey, claim.Actor
-	a, ok := s.attempts[key]
+	publisherID, key, actor := claim.PublisherID, claim.IdempotencyKey, claim.Actor
+	a, ok := s.attempts[attemptKey(publisherID, key)]
 	if !ok {
 		return store.ErrNotFound
 	}
@@ -247,7 +251,7 @@ func (s *Store) FinishApply(ctx context.Context, publisherID string, claim domai
 	res := result
 	a.Result = &res
 	a.FinishedAt = &now
-	s.attempts[key] = a
+	s.attempts[attemptKey(publisherID, key)] = a
 	if p.Status == domain.PlanPending { // a terminal status is never overwritten
 		p.Status = result.Status
 		s.plans[p.ID] = p

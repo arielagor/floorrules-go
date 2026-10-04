@@ -88,6 +88,8 @@ Commit 1f644bd therefore went in on the strength of checks run by hand just befo
 
 The install instructions now say why a copy is not enough.
 
+The first real commit through the hook (the docs commit) was then blocked with `gofmt: command not found`, because Go was not on that shell's PATH. That is the intended behaviour: the hook fails closed when a tool is missing, instead of skipping it. The commit was re-run with Go on PATH and passed all five stages.
+
 ## Caught by review, not by a tool
 
 Found while re-reading the code before the checks ran. Listed separately so the tools don't get credit for them.

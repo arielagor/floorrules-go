@@ -32,6 +32,7 @@ func Run(t *testing.T, newStore Factory) {
 	t.Run("AuditAndOutboxAtomicWithChange", func(t *testing.T) { testAuditOutbox(t, newStore(t)) })
 	t.Run("EventDedupe", func(t *testing.T) { testEventDedupe(t, newStore(t)) })
 	t.Run("OutboxRedelivery", func(t *testing.T) { testOutboxRedelivery(t, newStore(t)) })
+	t.Run("OutboxFailureBackoffAndDeadLetter", func(t *testing.T) { testOutboxFailure(t, newStore(t)) })
 }
 
 func newRule(pub, geo string) domain.Rule {
@@ -460,5 +461,58 @@ func testOutboxRedelivery(t *testing.T, s store.Store) {
 	time.Sleep(5 * time.Millisecond)
 	if third, _ := s.ClaimOutbox(ctx, 10, 0); len(third) != 0 {
 		t.Fatalf("sent event redelivered: %v", third)
+	}
+}
+
+// testOutboxFailure (day-2 review M4): a failed delivery is counted on the
+// row, held back for its backoff, and dead-lettered at the attempt limit;
+// a dead row is never claimed again but is still reported.
+func testOutboxFailure(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	if _, err := s.CreateRule(ctx, newRule("pub-a", "US")); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.OutboxStats(ctx); err != nil || st.Pending != 1 || st.Dead != 0 {
+		t.Fatalf("stats before = %+v, %v", st, err)
+	}
+	evs, err := s.ClaimOutbox(ctx, 10, 0)
+	if err != nil || len(evs) != 1 || evs[0].Attempts != 0 {
+		t.Fatalf("claim = %+v, %v", evs, err)
+	}
+	ev := evs[0]
+	if dead, err := s.MarkOutboxFailed(ctx, ev.ID, "consumer down", time.Hour, 2); err != nil || dead {
+		t.Fatalf("first failure: dead=%v err=%v", dead, err)
+	}
+	if again, _ := s.ClaimOutbox(ctx, 10, 0); len(again) != 0 {
+		t.Fatalf("claimed inside its backoff: %+v", again)
+	}
+	if dead, err := s.MarkOutboxFailed(ctx, ev.ID, "consumer down", 0, 2); err != nil || !dead {
+		t.Fatalf("second failure at the limit: dead=%v err=%v", dead, err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if again, _ := s.ClaimOutbox(ctx, 10, 0); len(again) != 0 {
+		t.Fatalf("dead-lettered event claimed: %+v", again)
+	}
+	if st, err := s.OutboxStats(ctx); err != nil || st.Pending != 0 || st.Dead != 1 {
+		t.Fatalf("stats after = %+v, %v", st, err)
+	}
+	if dead, err := s.MarkOutboxFailed(ctx, ev.ID, "again", 0, 2); err != nil || dead {
+		t.Fatalf("failure on a dead row must be a no-op: dead=%v err=%v", dead, err)
+	}
+
+	// The attempt count travels with the event on the next claim.
+	if _, err := s.CreateRule(ctx, newRule("pub-a", "CA")); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := s.ClaimOutbox(ctx, 10, 0)
+	if len(next) != 1 {
+		t.Fatalf("claim = %+v", next)
+	}
+	if _, err := s.MarkOutboxFailed(ctx, next[0].ID, "blip", 0, 5); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if again, _ := s.ClaimOutbox(ctx, 10, 0); len(again) != 1 || again[0].Attempts != 1 {
+		t.Fatalf("retry claim = %+v; want Attempts 1", again)
 	}
 }

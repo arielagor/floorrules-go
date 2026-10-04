@@ -35,6 +35,22 @@ func TestRegistry_TextFormat(t *testing.T) {
 	}
 }
 
+func TestRegistry_GaugeIsSetNotAdded(t *testing.T) {
+	r := New()
+	r.Set("outbox_pending", 7)
+	r.Set("outbox_pending", 3)
+	if got := r.Get("outbox_pending"); got != 3 {
+		t.Fatalf("gauge = %v, want 3", got)
+	}
+	var b strings.Builder
+	if err := r.WriteText(&b); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "# TYPE outbox_pending gauge\noutbox_pending 3\n") {
+		t.Fatalf("gauge not rendered as a gauge:\n%s", b.String())
+	}
+}
+
 func TestRegistry_NilIsNoop(t *testing.T) {
 	var r *Registry
 	r.Inc("x") // must not panic

@@ -12,16 +12,35 @@ import (
 	"sync"
 )
 
-// Registry holds counters keyed by name and label set.
+// Registry holds counters and gauges keyed by name and label set.
 type Registry struct {
 	mu       sync.Mutex
 	help     map[string]string
 	counters map[string]map[string]float64 // name -> rendered labels -> value
+	gauges   map[string]bool               // names written with Set
 }
 
 // New returns an empty registry.
 func New() *Registry {
-	return &Registry{help: map[string]string{}, counters: map[string]map[string]float64{}}
+	return &Registry{help: map[string]string{}, counters: map[string]map[string]float64{}, gauges: map[string]bool{}}
+}
+
+// Set sets a gauge to v. A name is a gauge or a counter, never both. A nil
+// registry is a no-op.
+func (r *Registry) Set(name string, v float64, labels ...string) {
+	if r == nil {
+		return
+	}
+	key := renderLabels(labels)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m := r.counters[name]
+	if m == nil {
+		m = map[string]float64{}
+		r.counters[name] = m
+	}
+	r.gauges[name] = true
+	m[key] = v
 }
 
 // Describe sets the HELP text for a counter.
@@ -77,7 +96,7 @@ var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 
 func escape(v string) string { return labelEscaper.Replace(v) }
 
-// WriteText renders every counter in the Prometheus text exposition format,
+// WriteText renders every counter and gauge in the Prometheus text exposition format,
 // sorted for stable output.
 func (r *Registry) WriteText(w io.Writer) error {
 	r.mu.Lock()
@@ -93,7 +112,11 @@ func (r *Registry) WriteText(w io.Writer) error {
 				return err
 			}
 		}
-		if _, err := fmt.Fprintf(w, "# TYPE %s counter\n", n); err != nil {
+		typ := "counter"
+		if r.gauges[n] {
+			typ = "gauge"
+		}
+		if _, err := fmt.Fprintf(w, "# TYPE %s %s\n", n, typ); err != nil {
 			return err
 		}
 		keys := make([]string, 0, len(r.counters[n]))

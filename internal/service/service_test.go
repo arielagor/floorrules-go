@@ -498,14 +498,13 @@ func TestRuleChanged_OutboxToConsumerWithDedupe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	q := events.NewMemQueue(16, 3, h.svc.cfg.Log)
+	q := events.NewDispatcher()
 	handled := make(chan string, 8)
 	q.Subscribe(domain.TopicRuleChanged, func(ctx context.Context, m events.Message) error {
 		err := h.svc.HandleRuleChanged(ctx, m)
 		handled <- m.ID
 		return err
 	})
-	go q.Run(ctx)
 
 	h.rule(t, "ctv", "US", 2_000_000)
 	relay := &events.Relay{Store: h.st, Pub: q, Batch: 10, Lease: time.Minute, Log: h.svc.cfg.Log, Metrics: h.m}

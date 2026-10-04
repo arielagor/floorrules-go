@@ -28,6 +28,16 @@ var (
 	ErrLeaseLost = errors.New("apply lease lost: another worker took over this attempt")
 )
 
+// OutboxStats describes the outbox backlog.
+type OutboxStats struct {
+	// Pending counts live events not yet delivered.
+	Pending int
+	// OldestPending is the age of the oldest of them, zero when none.
+	OldestPending time.Duration
+	// Dead counts dead-lettered events waiting for an operator.
+	Dead int
+}
+
 // Store is the persistence contract. Every method that changes state writes
 // its audit entry and, where relevant, its outbox event in the same
 // transaction as the change itself, so an event is never published for a
@@ -73,10 +83,25 @@ type Store interface {
 
 	ListAudit(ctx context.Context, publisherID string, limit int) ([]domain.AuditEntry, error)
 
-	// ClaimOutbox leases up to limit unsent events so that concurrent relays
-	// (one per replica) do not publish the same rows at the same time.
+	// ClaimOutbox leases up to limit unsent, live (not dead-lettered) events,
+	// oldest first, so that concurrent relays (one per replica) do not deliver
+	// the same rows at the same time. A row's lease is not ownership:
+	// delivery is at-least-once and consumers dedupe by event ID.
 	ClaimOutbox(ctx context.Context, limit int, lease time.Duration) ([]domain.Event, error)
+	// MarkOutboxSent marks events delivered. Callers mark a row only after
+	// its delivery succeeded; until then the row is the durable copy. It does
+	// not check who holds the claim: if two relays delivered the same row
+	// after a lease expired, both marks are correct.
 	MarkOutboxSent(ctx context.Context, ids []string) error
+	// MarkOutboxFailed records a failed delivery of event id: it counts the
+	// attempt, keeps the error, and holds the row back for retryIn before it
+	// can be claimed again. When the attempt count reaches maxAttempts the
+	// row is dead-lettered instead: it stays in the table for an operator
+	// and is never claimed again, and dead is true. A row already sent or
+	// dead is left alone.
+	MarkOutboxFailed(ctx context.Context, id, reason string, retryIn time.Duration, maxAttempts int) (dead bool, err error)
+	// OutboxStats reports the undelivered backlog for monitoring.
+	OutboxStats(ctx context.Context) (OutboxStats, error)
 
 	// CreatePlanForEvent records that consumer handled eventID and stores p,
 	// atomically. It returns false, storing nothing, if the event was already

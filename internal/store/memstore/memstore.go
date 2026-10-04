@@ -18,6 +18,8 @@ type outboxRow struct {
 	ev           domain.Event
 	claimedUntil time.Time
 	sent         bool
+	attempts     int
+	dead         bool
 }
 
 // Store is safe for concurrent use; one mutex makes every method atomic,
@@ -290,13 +292,62 @@ func (s *Store) ClaimOutbox(ctx context.Context, limit int, lease time.Duration)
 		if len(out) >= limit {
 			break
 		}
-		if row.sent || now.Before(row.claimedUntil) {
+		if row.sent || row.dead || now.Before(row.claimedUntil) {
 			continue
 		}
 		row.claimedUntil = now.Add(lease)
-		out = append(out, row.ev)
+		ev := row.ev
+		ev.Attempts = row.attempts
+		out = append(out, ev)
 	}
 	return out, nil
+}
+
+// MarkOutboxFailed implements store.Store.
+// The in-memory store keeps no error text; Postgres keeps it in last_error.
+func (s *Store) MarkOutboxFailed(ctx context.Context, id, _ string, retryIn time.Duration, maxAttempts int) (bool, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, row := range s.outbox {
+		if row.ev.ID != id {
+			continue
+		}
+		if row.sent || row.dead {
+			return false, nil
+		}
+		row.attempts++
+		row.claimedUntil = s.now().Add(retryIn)
+		row.dead = row.attempts >= maxAttempts
+		return row.dead, nil
+	}
+	return false, nil
+}
+
+// OutboxStats implements store.Store.
+func (s *Store) OutboxStats(ctx context.Context) (store.OutboxStats, error) {
+	if err := ctx.Err(); err != nil { // honour cancellation like a real database driver
+		return store.OutboxStats{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var st store.OutboxStats
+	now := s.now()
+	for _, row := range s.outbox {
+		switch {
+		case row.sent:
+		case row.dead:
+			st.Dead++
+		default:
+			st.Pending++
+			if age := now.Sub(row.ev.CreatedAt); age > st.OldestPending {
+				st.OldestPending = age
+			}
+		}
+	}
+	return st, nil
 }
 
 // MarkOutboxSent implements store.Store.

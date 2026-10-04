@@ -379,10 +379,10 @@ func (s *Store) ClaimOutbox(ctx context.Context, limit int, lease time.Duration)
 	rows, err := s.pool.Query(ctx, `UPDATE outbox SET claimed_until = now() + ($2::bigint * interval '1 millisecond')
 		WHERE id IN (
 			SELECT id FROM outbox
-			WHERE sent_at IS NULL AND (claimed_until IS NULL OR claimed_until <= now())
+			WHERE sent_at IS NULL AND dead_at IS NULL AND (claimed_until IS NULL OR claimed_until <= now())
 			ORDER BY seq LIMIT $1
 			FOR UPDATE SKIP LOCKED)
-		RETURNING seq, id::text, topic, payload, created_at`, limit, lease.Milliseconds())
+		RETURNING seq, id::text, topic, payload, created_at, attempts`, limit, lease.Milliseconds())
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +395,7 @@ func (s *Store) ClaimOutbox(ctx context.Context, limit int, lease time.Duration)
 	for rows.Next() {
 		var se seqEvent
 		var payload []byte
-		if err := rows.Scan(&se.seq, &se.ev.ID, &se.ev.Topic, &payload, &se.ev.CreatedAt); err != nil {
+		if err := rows.Scan(&se.seq, &se.ev.ID, &se.ev.Topic, &payload, &se.ev.CreatedAt, &se.ev.Attempts); err != nil {
 			return nil, err
 		}
 		se.ev.Payload = payload
@@ -420,6 +420,35 @@ func (s *Store) MarkOutboxSent(ctx context.Context, ids []string) error {
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE outbox SET sent_at = now() WHERE id = ANY($1::uuid[])`, ids)
 	return err
+}
+
+// MarkOutboxFailed implements store.Store.
+func (s *Store) MarkOutboxFailed(ctx context.Context, id, reason string, retryIn time.Duration, maxAttempts int) (bool, error) {
+	var dead bool
+	err := s.pool.QueryRow(ctx, `UPDATE outbox SET
+			attempts = attempts + 1,
+			last_error = left($2, 1000),
+			claimed_until = now() + ($3::bigint * interval '1 millisecond'),
+			dead_at = CASE WHEN attempts + 1 >= $4 THEN now() END
+		WHERE id = $1::uuid AND sent_at IS NULL AND dead_at IS NULL
+		RETURNING dead_at IS NOT NULL`, id, reason, retryIn.Milliseconds(), maxAttempts).Scan(&dead)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return dead, err
+}
+
+// OutboxStats implements store.Store.
+func (s *Store) OutboxStats(ctx context.Context) (store.OutboxStats, error) {
+	var st store.OutboxStats
+	var oldestSecs float64
+	err := s.pool.QueryRow(ctx, `SELECT
+			count(*) FILTER (WHERE dead_at IS NULL),
+			COALESCE(EXTRACT(EPOCH FROM now() - min(created_at) FILTER (WHERE dead_at IS NULL)), 0)::float8,
+			count(*) FILTER (WHERE dead_at IS NOT NULL)
+		FROM outbox WHERE sent_at IS NULL`).Scan(&st.Pending, &oldestSecs, &st.Dead)
+	st.OldestPending = time.Duration(oldestSecs * float64(time.Second))
+	return st, err
 }
 
 // CreatePlanForEvent implements store.Store.

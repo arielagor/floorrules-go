@@ -81,7 +81,12 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o runOpts) er
 	m.Describe("ssp_calls_total", "Ad platform calls by operation and outcome (after retries).")
 	m.Describe("ssp_retries_total", "Ad platform call retries by operation.")
 	m.Describe("apply_total", "Plan applies by resulting status.")
-	m.Describe("outbox_published_total", "Outbox events relayed to the queue.")
+	m.Describe("outbox_published_total", "Outbox events delivered (every consumer succeeded) and marked sent.")
+	m.Describe("outbox_delivery_failures_total", "Outbox deliveries that failed and were scheduled for retry or dead-lettered, by topic.")
+	m.Describe("outbox_dead_lettered_total", "Outbox events dead-lettered after their last attempt, by topic.")
+	m.Describe("outbox_pending", "Outbox events not yet delivered (excluding dead letters).")
+	m.Describe("outbox_oldest_pending_seconds", "Age of the oldest undelivered outbox event, 0 when none.")
+	m.Describe("outbox_dead_letters", "Dead-lettered outbox events waiting for an operator.")
 
 	// The sample ships only the in-memory SSP; a real adapter for a given ad
 	// server implements adapter.SSP and is selected here.
@@ -97,10 +102,14 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o runOpts) er
 		return err
 	}
 
-	queue := events.NewMemQueue(1024, 5, log)
-	queue.Subscribe(domain.TopicRuleChanged, svc.HandleRuleChanged)
+	// Consumers run synchronously inside the relay, and a row is marked sent
+	// only after they succeed, so the outbox row stays the durable copy until
+	// the event is handled. A broker adapter would replace the Dispatcher.
+	dispatcher := events.NewDispatcher()
+	dispatcher.Subscribe(domain.TopicRuleChanged, svc.HandleRuleChanged)
 	relay := &events.Relay{
-		Store: st, Pub: queue, Batch: 100, Lease: 30 * time.Second,
+		Store: st, Pub: dispatcher, Batch: 50, Lease: 2 * time.Minute, Timeout: 10 * time.Second,
+		MaxAttempts: 10, BaseBackoff: time.Second, MaxBackoff: 5 * time.Minute,
 		Interval: cfg.OutboxInterval, Log: log, Metrics: m,
 	}
 
@@ -126,7 +135,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o runOpts) er
 
 	bgCtx, stopBackground := context.WithCancel(context.Background())
 	var bg sync.WaitGroup
-	bg.Go(func() { queue.Run(bgCtx) })
 	bg.Go(func() { relay.Run(bgCtx) })
 
 	serveErr := make(chan error, 1)

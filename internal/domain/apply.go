@@ -81,6 +81,8 @@ type Event struct {
 	Topic     string          `json:"topic"`
 	Payload   json.RawMessage `json:"payload"`
 	CreatedAt time.Time       `json:"created_at"`
+	// Attempts counts earlier deliveries of this event that failed.
+	Attempts int `json:"attempts"`
 }
 
 // RuleChangedPayload is the body of a rule.changed event.

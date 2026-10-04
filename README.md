@@ -88,4 +88,4 @@ git config core.hooksPath scripts                               # enable the pre
 - A real broker (Pub/Sub). The relay talks to a `Publisher` interface and an in-process dispatcher stands in. A Pub/Sub adapter must return from `Publish` only after the broker has persisted the message.
 - Multi-currency, rule versioning/edit-in-place (rules are disabled and replaced), and a UI.
 - Running on a cluster. Migrations run in a separate Job (`floorsvc migrate`, as a migrator role) and the service only checks the schema version; `RUN_MIGRATIONS=true` is for local development. None of the manifests or Terraform has been applied.
-- The repo is public and CI runs on GitHub Actions. The first run passed all jobs (run 37177854018 on commit 4a621bd, https://github.com/arielagor/floorrules-go/actions/runs/37177854018). Each step and its output are also documented locally in VERIFY.md.
+- The repo is public and CI runs on GitHub Actions. After the day-2 review fixes, every job passed (run 37184234234 on commit 7e45ae3, https://github.com/arielagor/floorrules-go/actions/runs/37184234234). Each step and its output are also documented locally in VERIFY.md.
